@@ -1,0 +1,30 @@
+# Build artifacts
+/bin/
+*.exe
+attn-smoke
+
+# Go
+*.test
+*.out
+/vendor/
+
+# Local identity / secrets — NEVER commit private keys
+*.key
+.env
+.env.*
+attn-key*.hex
+/keys/
+
+# Upstream study clone (read-only reference, not part of this repo)
+/upstream-study/
+
+# Interop harness deps (regenerable via `bun install`)
+/testdata/interop/node_modules/
+# NOTE: testdata/vectors.json IS committed — it uses a well-known PUBLIC
+# throwaway test key, so `go test ./...` is self-contained without bun.
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

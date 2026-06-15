@@ -1,0 +1,10 @@
+{
+  "name": "attn-interop-harness",
+  "private": true,
+  "type": "module",
+  "description": "Generates real eciesjs/viem test vectors to prove the Go core is wire-compatible with the s0nderlabs attn plugin. Pinned to the exact versions the plugin uses.",
+  "dependencies": {
+    "eciesjs": "0.4.18",
+    "viem": "2.47.6"
+  }
+}
