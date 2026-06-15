@@ -1,0 +1,20 @@
+# gitleaks allowlist — reviewed false positives.
+#
+# Both findings below are the SAME fixed, PUBLIC, throwaway secp256k1 test key:
+#   0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318
+# It is a well-known public Ethereum example private key (appears throughout web3
+# docs/tutorials). In this repo it exists ONLY to deterministically generate the
+# ECIES + EIP-191 interop test vectors in testdata/vectors.json, proving the Go
+# core is wire-compatible with the s0nderlabs attn plugin (eciesjs@0.4.18 /
+# viem@2.47.6). It derives address 0x2c7536e3605d9c16a7a3d7b1898e529396a65c23,
+# which is NOT any real, funded, or runtime identity:
+#   - it is NOT this machine's attn identity,
+#   - it is NOT the Go client's runtime key (that lives in the gitignored
+#     go-client-key.hex and is never committed),
+#   - it is never used as a runtime key anywhere in the codebase.
+# Reviewed + confirmed a false positive by the attn-build-supervisor, 2026-06-15.
+#
+# Fingerprint format: <commit>:<file>:<rule>:<startLine>
+# Captured directly from `gitleaks 8.21.2` run with the global pre-push config.
+3932f80aedc7d44fa3f6c46e12634471674fddd7:testdata/vectors.json:generic-api-key:3
+3932f80aedc7d44fa3f6c46e12634471674fddd7:testdata/interop/gen-vectors.ts:generic-api-key:15
