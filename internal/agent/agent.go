@@ -44,7 +44,13 @@ type Agent struct {
 	presenceState        string
 	presenceMessage      string
 	surfaceSink          func(SurfaceEvent)
+	rootCtx              context.Context // agent lifecycle ctx (set in Start) for inbound downloads
+	downloadSem          chan struct{}   // bounds concurrent inbound-file downloads (audit M-flood)
 }
+
+// maxInboundDownloads caps concurrent inbound-file downloads so a contact cannot
+// OOM the daemon by flooding file references.
+const maxInboundDownloads = 8
 
 var addrRe = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
@@ -55,7 +61,10 @@ func normalize(a string) string { return strings.ToLower(strings.TrimSpace(a)) }
 // New builds an Agent and wires the relay Session's handlers to it. Call Start
 // to dial Base + begin the relay loop.
 func New(cfg *config.Config, st *store.Store, logger *log.Logger) *Agent {
-	a := &Agent{cfg: cfg, st: st, log: logger, presenceState: "online"}
+	a := &Agent{
+		cfg: cfg, st: st, log: logger, presenceState: "online",
+		downloadSem: make(chan struct{}, maxInboundDownloads),
+	}
 	a.sess = relay.NewSession(cfg.ID, cfg.RelayURL, relay.Handlers{
 		OnInbound:    a.handleInbound,
 		OnKeyLearned: a.onKeyLearned,
@@ -74,6 +83,11 @@ func (a *Agent) Address() string { return a.cfg.ID.Address() }
 // Start dials Base, hydrates presence + key cache from the store, and launches
 // the relay connect/reconnect loop. It returns immediately; Run lives in goroutines.
 func (a *Agent) Start(ctx context.Context) error {
+	// Record the lifecycle ctx so inbound-file downloads cancel on shutdown.
+	a.mu.Lock()
+	a.rootCtx = ctx
+	a.mu.Unlock()
+
 	// Hydrate persisted presence.
 	if v, ok, _ := a.st.MetaGet("presence_state"); ok && (v == "online" || v == "away") {
 		a.presenceState = v

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -11,6 +12,20 @@ import (
 
 	"github.com/TopengDev/attn-agnostic/internal/agent"
 )
+
+// checkLoopbackOrigin allows WS upgrades from non-browser clients (no Origin) and
+// from loopback origins only; cross-origin browser pages are rejected.
+func checkLoopbackOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return allowedHost(u.Host)
+}
 
 const (
 	wsWriteWait  = 10 * time.Second
@@ -48,8 +63,10 @@ func newHub(logger *log.Logger) *Hub {
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 4096,
-			// The server binds loopback only, so any client is same-host + same-user.
-			CheckOrigin: func(*http.Request) bool { return true },
+			// Reject cross-origin browser upgrades (audit M-csrf). Non-browser
+			// clients (the pi `ws` lib, gorilla dialer) send no Origin → allowed;
+			// a browser carries Origin → its host must be loopback.
+			CheckOrigin: checkLoopbackOrigin,
 		},
 	}
 }

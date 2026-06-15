@@ -81,24 +81,53 @@ var specs = map[string]spec{
 	"status-of":            {op: "status_of", pos: []string{"target"}, help: "<target>"},
 }
 
-func run(command string, argv []string) error {
-	addr := daemonAddr()
-	jsonOut := false
+// invocation is the parsed result of a CLI command line (no I/O).
+type invocation struct {
+	addr       string
+	jsonOut    bool
+	statusShow bool // GET /status (no op)
+	op         string
+	args       map[string]any
+}
 
-	// Extract global flags (--addr, --json) wherever they appear; collect the rest.
+func run(command string, argv []string) error {
+	inv, err := parseInvocation(command, argv)
+	if err != nil {
+		return err
+	}
+	if inv.statusShow {
+		return showStatus(inv.addr, inv.jsonOut)
+	}
+	return doOp(inv.addr, inv.op, inv.args, inv.jsonOut)
+}
+
+// parseInvocation turns a command + args into an invocation, or an error. It is
+// pure (no network) so it is unit-tested directly. It rejects unknown flags for
+// spec'd commands and honors a `--` end-of-flags sentinel, so a message that
+// contains dashes is never silently truncated (audit H4).
+func parseInvocation(command string, argv []string) (*invocation, error) {
+	inv := &invocation{addr: daemonAddr(), args: map[string]any{}}
+
 	var rest []string
 	flags := map[string]string{}
 	bools := map[string]bool{}
+	endFlags := false
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
+		if endFlags {
+			rest = append(rest, a)
+			continue
+		}
 		switch {
+		case a == "--": // end-of-flags: everything after is literal
+			endFlags = true
 		case a == "--json":
-			jsonOut = true
+			inv.jsonOut = true
 		case a == "--addr" && i+1 < len(argv):
-			addr = argv[i+1]
+			inv.addr = argv[i+1]
 			i++
 		case strings.HasPrefix(a, "--addr="):
-			addr = strings.TrimPrefix(a, "--addr=")
+			inv.addr = strings.TrimPrefix(a, "--addr=")
 		case strings.HasPrefix(a, "--"):
 			name := strings.TrimPrefix(a, "--")
 			if eq := strings.IndexByte(name, '='); eq >= 0 {
@@ -114,61 +143,78 @@ func run(command string, argv []string) error {
 		}
 	}
 
-	// status with no positional state → show daemon status (GET /status).
-	if command == "status" && len(rest) == 0 {
-		return showStatus(addr, jsonOut)
-	}
+	// status: no positional → show daemon status; otherwise set state.
 	if command == "status" {
-		args := map[string]any{"state": rest[0]}
-		if m, ok := flags["message"]; ok {
-			args["message"] = m
+		if len(rest) == 0 {
+			inv.statusShow = true
+			return inv, nil
 		}
-		return doOp(addr, "status", args, jsonOut)
+		if err := rejectUnknownFlags(command, flags, bools, set("message")); err != nil {
+			return nil, err
+		}
+		inv.op = "status"
+		inv.args["state"] = rest[0]
+		if m, ok := flags["message"]; ok {
+			inv.args["message"] = m
+		}
+		return inv, nil
 	}
 
-	// generic escape hatch: attn op <name> [k=v …] [--json-args '{…}']
+	// generic escape hatch: attn op <name> [k=v …] [--json-args '{…}'] — arbitrary
+	// flags become args, so no unknown-flag check here.
 	if command == "op" {
 		if len(rest) == 0 {
-			return fmt.Errorf("op: name required (e.g. `attn op contacts`)")
+			return nil, fmt.Errorf("op: name required (e.g. `attn op contacts`)")
 		}
-		op := rest[0]
-		args := map[string]any{}
+		inv.op = rest[0]
 		if raw, ok := flags["json-args"]; ok {
-			if err := json.Unmarshal([]byte(raw), &args); err != nil {
-				return fmt.Errorf("--json-args: %w", err)
+			if err := json.Unmarshal([]byte(raw), &inv.args); err != nil {
+				return nil, fmt.Errorf("--json-args: %w", err)
 			}
 		}
 		for _, kv := range rest[1:] {
 			if eq := strings.IndexByte(kv, '='); eq >= 0 {
-				args[kv[:eq]] = kv[eq+1:]
+				inv.args[kv[:eq]] = kv[eq+1:]
 			}
 		}
 		for k, v := range flags {
 			if k != "json-args" {
-				args[k] = v
+				inv.args[k] = v
 			}
 		}
-		return doOp(addr, op, args, jsonOut)
+		return inv, nil
 	}
 
 	sp, ok := specs[command]
 	if !ok {
-		return fmt.Errorf("unknown command %q (try `attn help`)", command)
+		return nil, fmt.Errorf("unknown command %q (try `attn help`)", command)
+	}
+	inv.op = sp.op
+
+	// Reject flags this command doesn't know — prevents silent message truncation
+	// (`attn send 0xabc hello --x world` must error, not drop "world").
+	allowed := map[string]bool{}
+	for fn := range sp.flags {
+		allowed[fn] = true
+	}
+	for fn := range sp.bools {
+		allowed[fn] = true
+	}
+	if err := rejectUnknownFlags(command, flags, bools, allowed); err != nil {
+		return nil, err
 	}
 
-	args := map[string]any{}
-	// positional
 	need := len(sp.pos)
 	if sp.optPos {
 		need = 0
 	}
 	if len(rest) < need {
-		return fmt.Errorf("%s %s\n  need %d arg(s), got %d", command, sp.help, need, len(rest))
+		return nil, fmt.Errorf("%s %s\n  need %d arg(s), got %d", command, sp.help, need, len(rest))
 	}
 	consumed := 0
 	for i, key := range sp.pos {
 		if i < len(rest) {
-			args[key] = rest[i]
+			inv.args[key] = rest[i]
 			consumed = i + 1
 		}
 	}
@@ -176,26 +222,47 @@ func run(command string, argv []string) error {
 	if sp.rest != "" {
 		tail := rest[consumed:]
 		if len(tail) == 0 && sp.rest == "message" {
-			return fmt.Errorf("%s %s\n  message is required", command, sp.help)
+			return nil, fmt.Errorf("%s %s\n  message is required", command, sp.help)
 		}
 		if sp.rest == "members" {
-			args["members"] = tail
+			inv.args["members"] = tail
 		} else {
-			args[sp.rest] = strings.Join(tail, " ")
+			inv.args[sp.rest] = strings.Join(tail, " ")
 		}
 	}
-	// flags
 	for fn, key := range sp.flags {
 		if v, ok := flags[fn]; ok {
-			args[key] = v
+			inv.args[key] = v
 		}
 	}
 	for fn, key := range sp.bools {
 		if bools[fn] {
-			args[key] = true
+			inv.args[key] = true
 		}
 	}
-	return doOp(addr, sp.op, args, jsonOut)
+	return inv, nil
+}
+
+func rejectUnknownFlags(command string, flags map[string]string, bools map[string]bool, allowed map[string]bool) error {
+	for fn := range flags {
+		if !allowed[fn] {
+			return fmt.Errorf("unknown flag --%s for %q (put `--` before a message that contains dashes)", fn, command)
+		}
+	}
+	for fn := range bools {
+		if !allowed[fn] {
+			return fmt.Errorf("unknown flag --%s for %q (put `--` before a message that contains dashes)", fn, command)
+		}
+	}
+	return nil
+}
+
+func set(keys ...string) map[string]bool {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	return m
 }
 
 // response mirrors the daemon's /op/{name} envelope.

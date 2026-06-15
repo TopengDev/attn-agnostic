@@ -19,7 +19,7 @@ import (
 	"github.com/TopengDev/attn-agnostic/internal/store"
 )
 
-func newTestServer(t *testing.T) *Server {
+func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 	id, err := identity.Generate()
 	if err != nil {
@@ -37,7 +37,7 @@ func newTestServer(t *testing.T) *Server {
 		InboxDir: t.TempDir(),
 	}
 	ag := agent.New(cfg, st, log.New(io.Discard, "", 0))
-	return New(ag, "127.0.0.1:0", log.New(io.Discard, "", 0))
+	return New(ag, "127.0.0.1:0", log.New(io.Discard, "", 0)), st
 }
 
 func TestLoopbackOnly(t *testing.T) {
@@ -56,7 +56,7 @@ func TestLoopbackOnly(t *testing.T) {
 }
 
 func TestRESTEndpoints(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	ts := httptest.NewServer(s.handler())
 	defer ts.Close()
 
@@ -115,7 +115,7 @@ func TestRESTEndpoints(t *testing.T) {
 // event through the hub over a live WS connection and asserts the frame matches
 // what pi-setup's extensions/attn/index.ts parser expects.
 func TestWSInboundContract(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	ts := httptest.NewServer(s.handler())
 	defer ts.Close()
 	s.ag.OnSurface(s.Broadcast)
@@ -210,6 +210,89 @@ func TestSurfaceToFrame(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHostGuard is the M-csrf regression test: a foreign Host header (DNS
+// rebinding) is rejected; loopback Host is allowed.
+func TestHostGuard(t *testing.T) {
+	s, _ := newTestServer(t)
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	// Foreign Host → 403.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
+	req.Host = "attacker.com"
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusForbidden {
+		t.Errorf("foreign Host → %d, want 403", r.StatusCode)
+	}
+
+	// Loopback Host → 200 (the default httptest client already sends 127.0.0.1).
+	r2, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Errorf("loopback Host → %d, want 200", r2.StatusCode)
+	}
+
+	// Unit-level allowlist.
+	for _, h := range []string{"127.0.0.1:9742", "localhost:9742", "[::1]:9742", "localhost"} {
+		if !allowedHost(h) {
+			t.Errorf("allowedHost(%q) = false, want true", h)
+		}
+	}
+	for _, h := range []string{"attacker.com", "attacker.com:9742", "8.8.8.8:80", ""} {
+		if allowedHost(h) {
+			t.Errorf("allowedHost(%q) = true, want false", h)
+		}
+	}
+}
+
+// TestCheckLoopbackOrigin pins the WS CheckOrigin policy (M-csrf).
+func TestCheckLoopbackOrigin(t *testing.T) {
+	mk := func(origin string) *http.Request {
+		r, _ := http.NewRequest(http.MethodGet, "/", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		return r
+	}
+	if !checkLoopbackOrigin(mk("")) {
+		t.Error("no-Origin (non-browser client) should be allowed")
+	}
+	if !checkLoopbackOrigin(mk("http://127.0.0.1:9742")) {
+		t.Error("loopback Origin should be allowed")
+	}
+	if checkLoopbackOrigin(mk("https://attacker.com")) {
+		t.Error("cross-origin browser request should be rejected")
+	}
+}
+
+// TestPeersDBErrorIs500 is the H4 regression test: a DB read failure surfaces as
+// 5xx, not an empty-but-200 result that masks data loss.
+func TestPeersDBErrorIs500(t *testing.T) {
+	s, st := newTestServer(t)
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	st.Close() // force every subsequent store read to error
+
+	for _, path := range []string{"/peers", "/history?with=0xabc"} {
+		r, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		r.Body.Close()
+		if r.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%s with broken DB → %d, want 500", path, r.StatusCode)
+		}
 	}
 }
 

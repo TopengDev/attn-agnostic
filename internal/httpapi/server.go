@@ -50,6 +50,9 @@ func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second, // > opTimeout; WS is hijacked so unaffected
+		IdleTimeout:       120 * time.Second,
 	}
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -69,11 +72,41 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// handler builds the route mux (shared by Run and tests).
+// handler builds the route mux (shared by Run and tests), wrapped in the
+// Host-header guard.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	s.routes(mux)
-	return mux
+	return hostGuard(mux)
+}
+
+// hostGuard rejects requests whose Host header is not a loopback name (audit
+// M-csrf — DNS-rebinding / local CSRF defense). The listener already binds
+// loopback, but a browser page on attacker.com whose DNS rebinds to 127.0.0.1
+// would still carry a foreign Host; this blocks it before any handler runs.
+func hostGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowedHost(r.Host) {
+			http.Error(w, "forbidden: host not allowed", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allowedHost reports whether a Host (or Origin) authority is a loopback name.
+func allowedHost(authority string) bool {
+	host := strings.TrimSpace(authority)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]") // strip IPv6 brackets
+	host = strings.ToLower(host)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) routes(mux *http.ServeMux) {

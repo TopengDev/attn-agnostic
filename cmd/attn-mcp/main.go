@@ -101,7 +101,15 @@ func serveHTTP(ctx context.Context, server *mcp.Server, addr, daemonAddr string,
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(getServer, nil))
 	mux.Handle("/sse", mcp.NewSSEHandler(getServer, nil))
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// ReadHeaderTimeout + ReadTimeout + IdleTimeout guard against slow-loris;
+	// WriteTimeout is intentionally left unset because the streamable-HTTP / SSE
+	// transports hold long-lived server→client response streams.
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)

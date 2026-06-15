@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const opTimeout = 30 * time.Second
+const (
+	opTimeout       = 30 * time.Second
+	maxHistoryLimit = 1000 // cap GET /history?limit= (local-DoS guard)
+)
 
 // handleOp is the canonical surface: POST /op/{name} with a JSON args object,
 // dispatched verbatim through agent.Dispatch. This is the ONLY path the CLI and
@@ -57,10 +60,16 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 // handleStatus → {address, relayConnected, peers} (pi contract).
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	contacts, err := s.ag.ContactsView()
+	if err != nil {
+		// /status is a health endpoint — stay up, but log + report 0 rather than
+		// silently implying an authoritative empty contact set.
+		s.log.Printf("[http] /status: contacts read failed: %v", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"address":        s.ag.Address(),
 		"relayConnected": s.ag.RelayReady(),
-		"peers":          len(s.ag.ContactsView()),
+		"peers":          len(contacts),
 	})
 }
 
@@ -72,7 +81,12 @@ func (s *Server) handleLocalPeers(w http.ResponseWriter, _ *http.Request) {
 
 // handlePeers → {peers:[{address,name,added_at}]} (pi contract; = contacts).
 func (s *Server) handlePeers(w http.ResponseWriter, _ *http.Request) {
-	contacts := s.ag.ContactsView()
+	contacts, err := s.ag.ContactsView()
+	if err != nil {
+		s.log.Printf("[http] /peers: contacts read failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to read contacts"})
+		return
+	}
 	peers := make([]map[string]any, 0, len(contacts))
 	for _, c := range contacts {
 		var name any
@@ -97,7 +111,15 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	msgs := s.ag.HistoryView(with, limit)
+	if limit > maxHistoryLimit { // cap to avoid a local DoS via limit=2147483647
+		limit = maxHistoryLimit
+	}
+	msgs, err := s.ag.HistoryView(with, limit)
+	if err != nil {
+		s.log.Printf("[http] /history: read failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to read history"})
+		return
+	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, map[string]any{
