@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/TopengDev/attn-agnostic/adapters/opencode"
+	"github.com/TopengDev/attn-agnostic/internal/buildinfo"
 )
 
 func main() {
@@ -57,8 +58,14 @@ func main() {
 		password  = flag.String("password", os.Getenv("OPENCODE_SERVER_PASSWORD"), "opencode server password (Authorization: Bearer); default unsecured same-host")
 		pin       = flag.String("version-pin", "1.3", "required opencode version prefix (runtime route/pin guard); empty disables")
 		title     = flag.String("title", "attn-opencode", "title for a --new session")
+		showVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println("attn-opencode " + buildinfo.String())
+		return
+	}
 
 	logger := log.New(os.Stderr, "attn-opencode ", log.LstdFlags|log.Lmsgprefix)
 

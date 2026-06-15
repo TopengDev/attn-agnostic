@@ -1,5 +1,6 @@
 # Build artifacts
 /bin/
+/dist/
 *.exe
 # Stray binaries built into the repo ROOT only. A bare `attn-smoke`/`attnd`
 # pattern would ALSO match the cmd/attn-smoke/ + cmd/attnd/ SOURCE dirs and

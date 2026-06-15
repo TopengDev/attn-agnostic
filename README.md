@@ -11,18 +11,24 @@ s0nderlabs relay + Base mainnet name registry** — with one-repo setup.
 > as a reusable Go core (and, later, a daemon + CLI + MCP server + per-harness
 > inbound adapters).
 
-**Status: M2 — the product interfaces (HTTP REST + WS inbound + CLI + MCP).** On
-top of the M1 daemon, M2 fronts the single `agent.Dispatch` seam with four
-interfaces, all on localhost: a **HTTP REST API** (`127.0.0.1:9742`) exposing all
-29 ops plus pi-compat endpoints; a **WebSocket inbound-event stream** on the same
-port whose frame shape matches pi-setup's existing extension (so the M3 pi adapter
-is drop-in) and carries a `steer`/`followUp` delivery-mode hint; a user-facing
-**`attn` CLI**; and an **`attn-mcp` MCP server** (stdio + streamable-HTTP/SSE)
-re-exposing the 29-tool surface to MCP-native harnesses (Claude Code, opencode,
-hermes). REST/CLI/MCP hold no business logic — every op flows through the one
-daemon. All four were verified live against the real relay (two daemons + a WS
-probe mimicking the pi extension). Paid name writes stay **gated**; servers bind
-loopback only. See `docs/ideation/05-build-plan.md`.
+**Status: M4 — complete. The full cross-platform stack ships from one repo.**
+A daemon + CLI + MCP server + three harness adapters (pi, opencode, hermes),
+all on loopback, plus **one-line installers** and **per-OS daemon services**.
+The whole tree is **pure Go (no CGO)**, so it cross-compiles cleanly to
+`linux/{amd64,arm64}`, `darwin/{amd64,arm64}`, and `windows/amd64` from a single
+host — see [`docs/INSTALL.md`](docs/INSTALL.md) to stand up the stack on any of
+the three. Paid Base name writes stay **gated**; every server binds loopback only.
+
+> **M3** added the three realtime **inbound** adapters: a pi TypeScript extension,
+> an opencode Go bridge (`attn-opencode`, inject via `prompt_async`), and a hermes
+> Go bridge + Python plugin (`attn-hermes-bridge`, HMAC-signed → stable session).
+
+> **M2** fronted the daemon's single `agent.Dispatch` seam with four localhost
+> interfaces: a **REST API** (`127.0.0.1:9742`, all 29 ops + pi-compat endpoints),
+> a **WS inbound-event stream** (pi-compatible frame shape + `steer`/`followUp`
+> hint), the **`attn` CLI**, and the **`attn-mcp` MCP server** (stdio +
+> streamable-HTTP/SSE) re-exposing the 29-tool surface. REST/CLI/MCP hold no
+> business logic — every op flows through the one daemon.
 
 > **M1** added the long-running `attnd` daemon (persistent relay connection with
 > reconnect + backoff + watchdogs), a pure-Go SQLite state store (contacts,
@@ -33,6 +39,30 @@ loopback only. See `docs/ideation/05-build-plan.md`.
 > ECIES E2E encryption, the EIP-191 challenge-response handshake, and the relay
 > WebSocket client — all wire-compatible with the live relay and the existing
 > Claude-Code attn plugin.
+
+## Install
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/TopengDev/attn-agnostic/main/scripts/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/TopengDev/attn-agnostic/main/scripts/install.ps1 | iex
+```
+
+The installer detects your OS + arch, installs the binaries to a PATH dir,
+generates a loopback-only identity (key `0600`, never printed), and sets up a
+per-user daemon service. It is idempotent. **From a checkout** (the path until
+releases are published — the installer auto-detects it and builds from source):
+
+```sh
+git clone https://github.com/TopengDev/attn-agnostic && cd attn-agnostic
+./scripts/install.sh
+```
+
+Then: `attn status` · point an MCP harness at `attn-mcp` · wire an inbound
+adapter. **Full per-OS guide, env vars, name registration, and the three
+adapters: [`docs/INSTALL.md`](docs/INSTALL.md).**
 
 ## Why clean-room?
 
@@ -69,12 +99,21 @@ internal/agent       orchestrator: the 29 attn ops + inbound policy/persistence
 internal/httpapi     M2 product interface: localhost REST (all 29 ops + pi-compat)
                      + WS inbound-event stream (pi frame shape + delivery-mode hint)
 internal/control     local Unix-socket JSON control plane (attnd ⇄ attnctl)
+internal/buildinfo   version/commit/date, injected at link time by scripts/build.sh
 cmd/attnd            daemon: persistent connection + state + REST/WS interface
 cmd/attn             M2 user-facing CLI (thin client over the daemon's REST API)
 cmd/attn-mcp         M2 MCP server (stdio + streamable-HTTP/SSE), 29-tool surface
+cmd/attn-opencode    M3 opencode adapter bridge (WS subscriber → prompt_async)
 cmd/attnctl          low-level control client to drive/verify the daemon's ops
 cmd/attn-smoke       M0 smoke + interop CLI
+adapters/pi          M3 pi adapter (TypeScript extension)
+adapters/opencode    M3 opencode adapter engine (client + bridge + render)
+adapters/hermes      M3 hermes adapter (Go bridge cmd + Python platform plugin)
+scripts/build.sh     M4 cross-compile matrix → dist/<os>-<arch>/
+scripts/install.sh   M4 one-line installer (Linux/macOS); install.ps1 (Windows)
+scripts/services     M4 per-OS daemon service files (systemd / launchd) + README
 testdata/interop     bun harness that generates real eciesjs/viem test vectors
+docs/INSTALL.md      full-stack install + per-OS setup + adapter wiring (M4)
 docs/ideation        vision, architecture, build plan, prototype findings
 ```
 
@@ -90,6 +129,19 @@ go build -o bin/attn-mcp ./cmd/attn-mcp  # MCP server (stdio / HTTP)
 go build -o bin/attnctl ./cmd/attnctl    # low-level control client
 go build -o bin/attn-smoke ./cmd/attn-smoke
 ```
+
+**Cross-compile matrix** — `scripts/build.sh` builds every shippable binary for
+all targets (no CGO, so no C toolchain needed), embedding the version:
+
+```sh
+./scripts/build.sh                 # linux/{amd64,arm64} darwin/{amd64,arm64} windows/amd64
+./scripts/build.sh linux/arm64     # a single target → dist/linux-arm64/
+ATTN_VERSION=v0.1.0 ./scripts/build.sh
+```
+
+Output lands in `dist/<os>-<arch>/` with a `SHA256SUMS.txt`; each binary reports
+`--version`. To install (build-or-download + service setup), see
+[`docs/INSTALL.md`](docs/INSTALL.md).
 
 ## Quickstart (`attnd` daemon + `attnctl`)
 

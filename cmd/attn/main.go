@@ -19,6 +19,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/TopengDev/attn-agnostic/internal/buildinfo"
 )
 
 func main() {
@@ -29,6 +31,9 @@ func main() {
 	switch os.Args[1] {
 	case "-h", "--help", "help":
 		usage()
+		return
+	case "version", "--version", "-V":
+		fmt.Println("attn " + buildinfo.String())
 		return
 	}
 	if err := run(os.Args[1], os.Args[2:]); err != nil {

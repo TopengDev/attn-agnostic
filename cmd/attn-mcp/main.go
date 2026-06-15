@@ -22,18 +22,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TopengDev/attn-agnostic/internal/buildinfo"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
-
-const version = "0.1.0"
 
 func main() {
 	var (
 		transport = flag.String("transport", "stdio", "transport: stdio | http")
 		httpAddr  = flag.String("addr", "127.0.0.1:9743", "HTTP transport bind (localhost only)")
 		daemon    = flag.String("daemon", "", "attnd REST address (default 127.0.0.1:9742 / ATTN_HTTP_ADDR)")
+		showVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println("attn-mcp " + buildinfo.String())
+		return
+	}
 
 	daemonAddr := *daemon
 	if daemonAddr == "" {
@@ -67,7 +72,7 @@ func main() {
 
 // buildServer registers all 29 tools, each forwarding to the daemon by op-name.
 func buildServer(daemonAddr string) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "attn", Version: version}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "attn", Version: buildinfo.Version}, nil)
 	handler := func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op := req.Params.Name
 		args := map[string]any{}

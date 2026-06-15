@@ -1,0 +1,27 @@
+[Unit]
+Description=attn-agnostic daemon (attnd) — agent messaging network client
+Documentation=https://github.com/TopengDev/attn-agnostic
+# No network-online ordering on purpose: attnd owns its own relay connection
+# with reconnect + backoff + a watchdog, so it tolerates the network (and the
+# relay) being down at start and recovers on its own.
+
+[Service]
+Type=simple
+# %h is the user's home — works as-is for the default install location.
+# install.sh rewrites this line if you install attnd elsewhere or set ATTN_HOME.
+ExecStart=%h/.local/bin/attnd
+Restart=on-failure
+RestartSec=3
+
+# Hardening — attnd is a loopback-only daemon that needs no privilege and only
+# writes its own state dir. ReadWritePaths must match ATTN_HOME (default below).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/attn
+PrivateTmp=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

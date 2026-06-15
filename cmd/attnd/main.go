@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/TopengDev/attn-agnostic/internal/agent"
+	"github.com/TopengDev/attn-agnostic/internal/buildinfo"
 	"github.com/TopengDev/attn-agnostic/internal/config"
 	"github.com/TopengDev/attn-agnostic/internal/control"
 	"github.com/TopengDev/attn-agnostic/internal/httpapi"
@@ -33,10 +34,31 @@ func main() {
 		sockPath = flag.String("sock", "", "control socket path (default: <home>/attnd.sock)")
 		httpAddr = flag.String("http", "", "localhost REST+WS bind (default: 127.0.0.1:9742 / ATTN_HTTP_ADDR)")
 		noHTTP   = flag.Bool("no-http", false, "disable the REST+WS interface (control socket only)")
+		showVer  = flag.Bool("version", false, "print version and exit")
+		initOnly = flag.Bool("init", false, "ensure home + identity exist, print the address, and exit (no daemon) — used by the installer")
 	)
 	flag.Parse()
 
+	if *showVer {
+		fmt.Println("attnd " + buildinfo.String())
+		return
+	}
+
 	logger := log.New(os.Stderr, "attnd ", log.LstdFlags|log.Lmsgprefix)
+
+	// -init: idempotent first-run setup. Resolve the platform home, generate +
+	// persist a 0600 key if none exists (never print the private key), report the
+	// public address, and exit without starting the daemon. Re-running just loads
+	// the existing identity. This is what the installers call so the very first
+	// `attnd` run isn't a blocking foreground process just to create a key.
+	if *initOnly {
+		cfg, err := config.Load(*keyHex, true)
+		if err != nil {
+			logger.Fatalf("init: %v", err)
+		}
+		fmt.Printf("attn identity ready\n  address: %s\n  home:    %s\n  key:     %s (0600, keep private)\n", cfg.ID.Address(), cfg.Home, cfg.KeyPath)
+		return
+	}
 
 	cfg, err := config.Load(*keyHex, *genKey)
 	if err != nil {

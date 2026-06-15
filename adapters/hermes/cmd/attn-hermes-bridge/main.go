@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -23,6 +24,7 @@ import (
 	"syscall"
 
 	"github.com/TopengDev/attn-agnostic/adapters/hermes/bridge"
+	"github.com/TopengDev/attn-agnostic/internal/buildinfo"
 )
 
 const hmacEnv = "ATTN_HERMES_HMAC_SECRET"
@@ -42,7 +44,13 @@ func main() {
 		"header carrying the hex HMAC-SHA256 of the POST body")
 	sessionKey := flag.String("session-key", envOr("ATTN_HERMES_SESSION_KEY", ""),
 		"override the `session` field sent to the receiver (stable session_key source); defaults to -session")
+	showVer := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println("attn-hermes-bridge " + buildinfo.String())
+		return
+	}
 
 	secret := strings.TrimSpace(os.Getenv(hmacEnv))
 	if secret == "" {

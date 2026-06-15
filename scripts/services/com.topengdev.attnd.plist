@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent for the attn-agnostic daemon (attnd) on macOS.
+
+  Install path: ~/Library/LaunchAgents/com.topengdev.attnd.plist
+  install.sh substitutes the __ATTND_BIN__ / __LOG_OUT__ / __LOG_ERR__
+  placeholders with absolute paths (launchd does not expand ~ or %h), then
+  loads it with `launchctl bootstrap gui/$(id -u)`.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.topengdev.attnd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ATTND_BIN__</string>
+    </array>
+
+    <!-- start at login and keep it alive, but only restart on a crash
+         (a clean exit / `attn op _shutdown` stays down). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_OUT__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_ERR__</string>
+</dict>
+</plist>
