@@ -167,7 +167,7 @@ class AttnAdapter(BasePlatformAdapter):
             self._runner = None
             return False
         self._mark_connected()
-        logger.info("[%s] listening on %s:%d (channel=%q)", self.name, self._host, self._port, self._channel)
+        logger.info("[%s] listening on %s:%d (channel=%r)", self.name, self._host, self._port, self._channel)
         return True
 
     async def disconnect(self) -> None:
