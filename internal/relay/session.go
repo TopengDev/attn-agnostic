@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -66,6 +67,12 @@ type Session struct {
 	authed   bool
 	lastPong time.Time
 
+	// onReadyActive single-flights OnReady so a reconnect storm can't launch
+	// overlapping outbox flushes (which could double-send the same row). wg tracks
+	// the in-flight OnReady goroutine so shutdown can join it.
+	onReadyActive atomic.Bool
+	wg            sync.WaitGroup
+
 	keyCache  map[string]string
 	keyWaits  map[string][]chan *string
 	resWaits  map[string][]chan *resolveResult
@@ -78,6 +85,15 @@ type Session struct {
 
 	http *http.Client
 }
+
+// maxFrameBytes bounds a single inbound WebSocket frame. attn frames are small:
+// a DM/group ECIES ciphertext (base64) or a control/system JSON object. File
+// BYTES travel over HTTP (send_file uploads to the relay and only a small URL
+// reference goes over the socket), so 8 MiB is far more than any legitimate
+// frame while making the bound intentional + documented and capping per-frame
+// memory against a hostile oversized frame (gorilla's default read limit is
+// unbounded).
+const maxFrameBytes = 8 << 20 // 8 MiB
 
 type resolveResult struct {
 	address string
@@ -123,8 +139,11 @@ func (s *Session) Address() string { return s.id.Address() }
 func (s *Session) HTTPBase() string { return s.httpBase }
 
 // Run drives the connect → auth → serve → reconnect loop until ctx is done.
-// Backoff is 1s doubling to 30s, reset to 1s on each successful auth.
+// Backoff is 1s doubling to 30s, reset to 1s on each successful auth. On exit it
+// joins any in-flight OnReady/outbox flush so the goroutine is never leaked
+// (the daemon may additionally call Wait() to block its own shutdown on it).
 func (s *Session) Run(ctx context.Context) {
+	defer s.wg.Wait()
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
@@ -169,6 +188,7 @@ func (s *Session) connectOnce(ctx context.Context) (authed bool) {
 		s.h.Logf("dial failed: %v", err)
 		return false
 	}
+	conn.SetReadLimit(maxFrameBytes) // intentional per-frame bound (see maxFrameBytes)
 
 	s.mu.Lock()
 	s.conn = conn
@@ -210,6 +230,12 @@ func (s *Session) connectOnce(ctx context.Context) (authed bool) {
 	s.mu.Unlock()
 	_ = old // readyCh is closed only on auth; replacing it resets WaitReady
 
+	// Unblock + clear every pending request waiter orphaned by this disconnect,
+	// so callers return immediately (clean retry path) instead of hanging until
+	// their per-call timeout, and the maps can't grow unboundedly across
+	// reconnect cycles on a flaky network.
+	s.drainWaiters()
+
 	select {
 	case <-authedCh:
 		authed = true
@@ -217,6 +243,82 @@ func (s *Session) connectOnce(ctx context.Context) (authed bool) {
 	}
 	s.h.Logf("disconnected")
 	return authed
+}
+
+// drainWaiters resolves every pending key/resolve/presence waiter with a nil
+// result and clears the maps. Idempotent (a second call ranges over empty maps)
+// and mutex-guarded. The delivery-status waiters (delivWait) are not drained
+// here: each Send caller deletes its own entry via defer and is bounded by its
+// own 15s timeout, so that map can't leak.
+func (s *Session) drainWaiters() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, waiters := range s.keyWaits {
+		for _, w := range waiters {
+			select {
+			case w <- nil:
+			default:
+			}
+		}
+		delete(s.keyWaits, k)
+	}
+	for k, waiters := range s.resWaits {
+		for _, w := range waiters {
+			select {
+			case w <- nil:
+			default:
+			}
+		}
+		delete(s.resWaits, k)
+	}
+	for k, waiters := range s.presWaits {
+		for _, w := range waiters {
+			select {
+			case w <- nil:
+			default:
+			}
+		}
+		delete(s.presWaits, k)
+	}
+}
+
+// launchOnReady fires the OnReady callback (outbox flush + presence re-assert)
+// after a successful (re)auth, single-flighted so a reconnect storm never runs
+// two flushes at once, and tracked on wg so Wait() can join it at shutdown.
+func (s *Session) launchOnReady() {
+	if s.h.OnReady == nil {
+		return
+	}
+	if !s.onReadyActive.CompareAndSwap(false, true) {
+		s.h.Logf("OnReady already running — skipping duplicate flush")
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer s.onReadyActive.Store(false)
+		s.h.OnReady()
+	}()
+}
+
+// Wait blocks until any in-flight OnReady goroutine has finished. The daemon
+// calls this during graceful shutdown so an outbox flush isn't cut off mid-run.
+func (s *Session) Wait() { s.wg.Wait() }
+
+// removeWaiter removes ch from m[key] (and drops the key if it empties). Callers
+// must hold s.mu. Used so a per-call timeout/cancel cleans up its own waiter
+// even on a live connection (no disconnect needed).
+func removeWaiter[T any](m map[string][]chan T, key string, ch chan T) {
+	waiters := m[key]
+	for i, w := range waiters {
+		if w == ch {
+			m[key] = append(waiters[:i:i], waiters[i+1:]...)
+			break
+		}
+	}
+	if len(m[key]) == 0 {
+		delete(m, key)
+	}
 }
 
 func (s *Session) readLoop(conn *websocket.Conn, authTimer *time.Timer, authedCh chan struct{}) {
@@ -270,9 +372,7 @@ func (s *Session) handle(conn *websocket.Conn, msg *serverMessage, authTimer *ti
 		case authedCh <- struct{}{}:
 		default:
 		}
-		if s.h.OnReady != nil {
-			go s.h.OnReady()
-		}
+		s.launchOnReady()
 
 	case "auth_error":
 		s.h.Logf("auth_error: %s — dropping conn", msg.Error)
@@ -529,8 +629,14 @@ func (s *Session) GetKey(ctx context.Context, address string) (string, error) {
 		}
 		return *pk, nil
 	case <-time.After(10 * time.Second):
+		s.mu.Lock()
+		removeWaiter(s.keyWaits, addr, ch)
+		s.mu.Unlock()
 		return "", fmt.Errorf("get_key timeout for %s", addr)
 	case <-ctx.Done():
+		s.mu.Lock()
+		removeWaiter(s.keyWaits, addr, ch)
+		s.mu.Unlock()
 		return "", ctx.Err()
 	}
 }
@@ -666,8 +772,14 @@ func (s *Session) Resolve(ctx context.Context, label string) (string, string, er
 		}
 		return r.address, r.pubKey, nil
 	case <-time.After(5 * time.Second):
+		s.mu.Lock()
+		removeWaiter(s.resWaits, lbl, ch)
+		s.mu.Unlock()
 		return "", "", fmt.Errorf("resolve timeout for %s", lbl)
 	case <-ctx.Done():
+		s.mu.Lock()
+		removeWaiter(s.resWaits, lbl, ch)
+		s.mu.Unlock()
 		return "", "", ctx.Err()
 	}
 }
@@ -696,8 +808,14 @@ func (s *Session) QueryPresence(ctx context.Context, address string) (state, mes
 		}
 		return r.state, r.message, true, nil
 	case <-time.After(5 * time.Second):
+		s.mu.Lock()
+		removeWaiter(s.presWaits, addr, ch)
+		s.mu.Unlock()
 		return "", "", false, fmt.Errorf("presence_query timeout for %s", addr)
 	case <-ctx.Done():
+		s.mu.Lock()
+		removeWaiter(s.presWaits, addr, ch)
+		s.mu.Unlock()
 		return "", "", false, ctx.Err()
 	}
 }
