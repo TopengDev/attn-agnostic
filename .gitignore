@@ -1,7 +1,12 @@
 # Build artifacts
 /bin/
 *.exe
-attn-smoke
+# Stray binaries built into the repo ROOT only. A bare `attn-smoke`/`attnd`
+# pattern would ALSO match the cmd/attn-smoke/ + cmd/attnd/ SOURCE dirs and
+# silently exclude them from git — so anchor these to the repo root.
+/attn-smoke
+/attnd
+/attnctl
 
 # Go
 *.test
@@ -10,10 +15,15 @@ attn-smoke
 
 # Local identity / secrets — NEVER commit private keys
 *.key
+*.hex
 .env
 .env.*
-attn-key*.hex
 /keys/
+
+# Local daemon state (SQLite db + WAL/SHM) if attnd is run inside the repo
+*.db
+*.db-shm
+*.db-wal
 
 # Upstream study clone (read-only reference, not part of this repo)
 /upstream-study/

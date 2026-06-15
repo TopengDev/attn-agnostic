@@ -24,19 +24,41 @@ import (
 	eciesgo "github.com/ecies/go/v2"
 )
 
-// EncryptBase64 encrypts plaintext to the recipient's secp256k1 public key
-// (hex, with or without 0x prefix; compressed or uncompressed) using ECIES, and
-// returns standard-base64 ciphertext — the exact form the relay envelope carries
-// in its `encrypted` field.
-func EncryptBase64(recipientPubHex string, plaintext []byte) (string, error) {
+// EncryptBinary encrypts plaintext to the recipient's secp256k1 public key (hex,
+// with or without 0x prefix; compressed or uncompressed) using ECIES, returning
+// the RAW ciphertext bytes ([ephPub][nonce][tag][ct]). This is the form the
+// upstream `encryptBinary` produces for file uploads (uploaded raw, not base64).
+func EncryptBinary(recipientPubHex string, plaintext []byte) ([]byte, error) {
 	pubHex := strings.TrimPrefix(strings.TrimSpace(recipientPubHex), "0x")
 	pub, err := eciesgo.NewPublicKeyFromHex(pubHex)
 	if err != nil {
-		return "", fmt.Errorf("parse recipient pubkey: %w", err)
+		return nil, fmt.Errorf("parse recipient pubkey: %w", err)
 	}
 	ct, err := eciesgo.Encrypt(pub, plaintext)
 	if err != nil {
-		return "", fmt.Errorf("ecies encrypt: %w", err)
+		return nil, fmt.Errorf("ecies encrypt: %w", err)
+	}
+	return ct, nil
+}
+
+// DecryptBinary decrypts RAW ECIES ciphertext bytes with the 32-byte secp256k1
+// private key (the inverse of EncryptBinary; used for received files).
+func DecryptBinary(privKey []byte, ct []byte) ([]byte, error) {
+	priv := eciesgo.NewPrivateKeyFromBytes(privKey)
+	pt, err := eciesgo.Decrypt(priv, ct)
+	if err != nil {
+		return nil, fmt.Errorf("ecies decrypt: %w", err)
+	}
+	return pt, nil
+}
+
+// EncryptBase64 encrypts plaintext to the recipient's secp256k1 public key using
+// ECIES and returns standard-base64 ciphertext — the exact form the relay
+// envelope carries in its `encrypted` field.
+func EncryptBase64(recipientPubHex string, plaintext []byte) (string, error) {
+	ct, err := EncryptBinary(recipientPubHex, plaintext)
+	if err != nil {
+		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(ct), nil
 }
@@ -48,10 +70,5 @@ func DecryptBase64(privKey []byte, b64 string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode: %w", err)
 	}
-	priv := eciesgo.NewPrivateKeyFromBytes(privKey)
-	pt, err := eciesgo.Decrypt(priv, ct)
-	if err != nil {
-		return nil, fmt.Errorf("ecies decrypt: %w", err)
-	}
-	return pt, nil
+	return DecryptBinary(privKey, ct)
 }

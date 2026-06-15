@@ -11,12 +11,19 @@ s0nderlabs relay + Base mainnet name registry** — with one-repo setup.
 > as a reusable Go core (and, later, a daemon + CLI + MCP server + per-harness
 > inbound adapters).
 
-**Status: M0 — protocol / relay / crypto core.** This milestone builds and proves
-the foundational, interop-critical layer: secp256k1 identity, ECIES E2E
-encryption, the EIP-191 challenge-response handshake, and the relay WebSocket
-client — all wire-compatible with the live relay and the existing Claude-Code
-attn plugin. Later milestones (M1–M4) add the daemon, full tool surface,
-interfaces, and per-harness inbound adapters (see `docs/ideation/05-build-plan.md`).
+**Status: M1 — daemon + SQLite state + full outbound 29-tool parity.** On top of
+the M0 protocol core, M1 adds the long-running `attnd` daemon (persistent relay
+connection with reconnect + backoff + watchdogs), a pure-Go SQLite state store
+(contacts, groups, history, inbox/outbox, mutes, key cache), a Base mainnet
+name-registrar client, and the complete **outbound** operation surface — all 29
+attn tools — driven and verified live against the real relay + Base. Inbound is
+received/decrypted/verified/stored/acked; realtime push to a harness and the
+HTTP/CLI/MCP interfaces are M2–M3. See `docs/ideation/05-build-plan.md`.
+
+> **M0** proved the foundational, interop-critical layer: secp256k1 identity,
+> ECIES E2E encryption, the EIP-191 challenge-response handshake, and the relay
+> WebSocket client — all wire-compatible with the live relay and the existing
+> Claude-Code attn plugin.
 
 ## Why clean-room?
 
@@ -40,9 +47,18 @@ versions (`eciesjs@0.4.18`, `viem@2.47.6`) — see Testing below.
 ## Layout
 
 ```
-internal/crypto      ECIES encrypt/decrypt (eciesjs-compatible)
+internal/crypto      ECIES encrypt/decrypt (eciesjs-compatible) + raw-binary (files)
 internal/identity    secp256k1 keys, ETH address, EIP-191 sign/verify, envelope sign/verify
-internal/relay       relay WebSocket client: handshake, get_key, send, listen
+internal/relay       relay WS: M0 single-shot Client + M1 persistent Session
+                     (reconnect/backoff/watchdog, reactions, presence, resolve, groups)
+internal/store       SQLite state (modernc.org/sqlite, CGO-free): contacts, groups,
+                     history, pending/outbox, mutes, key cache, meta
+internal/names       Base mainnet AttnNames registrar client (read live; writes gated)
+internal/config      portable platform paths (XDG/%AppData%/~Library) + key load
+internal/agent       orchestrator: the 29 attn ops + inbound policy/persistence
+internal/control     local Unix-socket JSON control plane (attnd ⇄ attnctl)
+cmd/attnd            M1 daemon (persistent connection + state + outbound surface)
+cmd/attnctl          control client to drive/verify the daemon's ops
 cmd/attn-smoke       M0 smoke + interop CLI
 testdata/interop     bun harness that generates real eciesjs/viem test vectors
 docs/ideation        vision, architecture, build plan, prototype findings
@@ -50,12 +66,35 @@ docs/ideation        vision, architecture, build plan, prototype findings
 
 ## Build
 
-Requires Go 1.24+.
+Requires Go 1.25+ (the pure-Go SQLite driver `modernc.org/sqlite` sets the floor).
 
 ```sh
 go build ./...
+go build -o bin/attnd ./cmd/attnd
+go build -o bin/attnctl ./cmd/attnctl
 go build -o bin/attn-smoke ./cmd/attn-smoke
 ```
+
+## Quickstart (`attnd` daemon + `attnctl`)
+
+```sh
+# Start the daemon (loads the identity from ATTN_HOME, generating one with -gen-key).
+# Platform config dir: $XDG_CONFIG_HOME/attn (Linux) — override with ATTN_HOME.
+ATTN_HOME=~/.config/attn ./bin/attnd -gen-key &
+
+# Drive any of the 29 ops through the daemon's control socket:
+./bin/attnctl _info                                   # address + relay readiness
+./bin/attnctl send to=alice.attn message="hello"       # name- or 0x-addressed
+./bin/attnctl add_contact address=0x… name=alice
+./bin/attnctl create_group name=devs members=0xaaa…,0xbbb…
+./bin/attnctl history with=0x… limit=20
+./bin/attnctl lookup query=alice.attn                  # live Base/relay resolve
+./bin/attnctl status state=away message="auditing"
+```
+
+`register_name` / `transfer_name` / `set_primary_name` are **gated**: the daemon
+encodes + simulates the on-chain write and returns the calldata, but never
+broadcasts a paid mainnet transaction (registration costs 0.001 ETH, irreversible).
 
 ## Quickstart (`attn-smoke`)
 

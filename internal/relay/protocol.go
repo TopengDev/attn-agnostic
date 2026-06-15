@@ -31,8 +31,15 @@ type serverMessage struct {
 	GroupName string `json:"group_name,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
 
-	// key_response
+	// key_response / resolve_response
 	PublicKey *string `json:"publicKey,omitempty"`
+
+	// resolve_response
+	Name string `json:"name,omitempty"`
+
+	// presence_response (also reused by status fields)
+	State   string `json:"state,omitempty"`
+	Message string `json:"message,omitempty"`
 
 	// delivery_status
 	To             string  `json:"to,omitempty"`
@@ -67,6 +74,35 @@ type getKeyFrame struct {
 type ackFrame struct {
 	Type string `json:"type"` // "ack"
 	ID   string `json:"id"`
+}
+
+// reactionFrame is a client→server emoji reaction on a prior message.
+type reactionFrame struct {
+	Type      string `json:"type"` // "reaction"
+	ID        string `json:"id"`
+	To        string `json:"to"`
+	MessageID string `json:"message_id"`
+	Encrypted string `json:"encrypted"`
+	Signature string `json:"signature"`
+}
+
+// resolveFrame asks the relay to resolve a .attn label.
+type resolveFrame struct {
+	Type string `json:"type"` // "resolve"
+	Name string `json:"name"`
+}
+
+// presenceSetFrame sets this agent's availability on the relay.
+type presenceSetFrame struct {
+	Type    string  `json:"type"` // "presence_set"
+	State   string  `json:"state"`
+	Message *string `json:"message"`
+}
+
+// presenceQueryFrame queries another agent's availability.
+type presenceQueryFrame struct {
+	Type    string `json:"type"` // "presence_query"
+	Address string `json:"address"`
 }
 
 // Inbound is a decrypted, signature-verified message delivered to a Listen handler.
