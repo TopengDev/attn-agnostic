@@ -43,6 +43,7 @@ type Agent struct {
 	lastInboundMessageID string
 	presenceState        string
 	presenceMessage      string
+	surfaceSink          func(SurfaceEvent)
 }
 
 var addrRe = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
@@ -202,6 +203,10 @@ func (a *Agent) handleInboundDM(ev relay.InboundEvent) {
 		if notified, _ := a.st.HasPendingNotified(ev.From); !notified {
 			_ = a.st.MarkPendingNotified(ev.From)
 			a.log.Printf("[inbound] PENDING message from unknown agent %s (approve with add_contact)", ev.From)
+			a.surface(SurfaceEvent{
+				Type: "message", Trust: "pending", From: ev.From, FromName: ev.FromName,
+				Message: ev.Plaintext, MessageID: ev.ID, Ts: ev.Ts, DeliveryMode: deliverFollowUp,
+			})
 		}
 		return
 	}
@@ -213,6 +218,7 @@ func (a *Agent) handleInboundDM(ev relay.InboundEvent) {
 	}
 	a.setLastInbound(ev.From, "", ev.ID)
 	a.log.Printf("[inbound] DM from %s: %s", ev.From, preview(ev.Plaintext))
+	a.surfaceInboundDM(ev)
 }
 
 func (a *Agent) handleInboundGroup(ev relay.InboundEvent) {
@@ -224,6 +230,11 @@ func (a *Agent) handleInboundGroup(ev relay.InboundEvent) {
 	}
 	a.setLastInbound(ev.From, ev.GroupID, ev.ID)
 	a.log.Printf("[inbound] group %q from %s: %s", ev.GroupName, ev.From, preview(ev.Plaintext))
+	a.surface(SurfaceEvent{
+		Type: "message", From: ev.From, FromName: ev.FromName,
+		Message: ev.Plaintext, MessageID: ev.ID, Ts: ev.Ts,
+		GroupID: ev.GroupID, GroupName: ev.GroupName, DeliveryMode: deliverFollowUp,
+	})
 }
 
 func (a *Agent) handleInboundReaction(ev relay.InboundEvent) {
@@ -238,6 +249,12 @@ func (a *Agent) handleInboundReaction(ev relay.InboundEvent) {
 	}
 	_ = a.st.SaveReaction(ev.ReactionFor, ev.From, ev.Plaintext, tsISO(ev.Ts))
 	a.log.Printf("[inbound] reaction %s from %s on %s", ev.Plaintext, ev.From, ev.ReactionFor)
+	a.surface(SurfaceEvent{
+		Type: "message", Trust: "reaction", From: ev.From, FromName: ev.FromName,
+		Message: ev.Plaintext, MessageID: ev.ID, Ts: ev.Ts,
+		GroupID: ev.GroupID, GroupName: ev.GroupName, ReactionFor: ev.ReactionFor,
+		DeliveryMode: deliverSteer,
+	})
 }
 
 // muted reports whether a peer/group is currently silenced (global, per-agent,

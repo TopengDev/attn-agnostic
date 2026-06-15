@@ -1,0 +1,137 @@
+// Package httpapi is attnd's product interface: a localhost-only HTTP REST API
+// (outbound + management, all 29 ops via agent.Dispatch) plus a WebSocket
+// inbound-event stream, both on one port. It deliberately mirrors pi-setup's
+// existing `127.0.0.1:9742` daemon contract (extensions/attn/index.ts: REST out
+// + WS in) so the M3 per-harness adapters are drop-in.
+//
+// Invariant: the REST/WS layer contains NO business logic. Every one of the 29
+// ops flows through agent.Dispatch; the pi-compat read endpoints
+// (/status, /peers, /history, /local-peers) only re-shape read-only store data
+// into pi's JSON contract. The single relay connection lives in the daemon.
+package httpapi
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/TopengDev/attn-agnostic/internal/agent"
+)
+
+// Server is the localhost REST + WS interface in front of one Agent.
+type Server struct {
+	ag   *agent.Agent
+	addr string
+	log  *log.Logger
+	hub  *Hub
+}
+
+// New builds the interface server. addr MUST be a loopback bind (enforced in Run).
+func New(ag *agent.Agent, addr string, logger *log.Logger) *Server {
+	if logger == nil {
+		logger = log.Default()
+	}
+	return &Server{ag: ag, addr: addr, log: logger, hub: newHub(logger)}
+}
+
+// Broadcast pushes a surfaced inbound event to all WS subscribers. Wire this as
+// the agent's surface sink: ag.OnSurface(srv.Broadcast).
+func (s *Server) Broadcast(ev agent.SurfaceEvent) { s.hub.Broadcast(ev) }
+
+// Run binds the (loopback-only) listener and serves until ctx is cancelled.
+func (s *Server) Run(ctx context.Context) error {
+	if err := loopbackOnly(s.addr); err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Handler:           s.handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", s.addr, err)
+	}
+	go func() {
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sctx)
+		s.hub.CloseAll()
+	}()
+	s.log.Printf("[http] REST+WS interface on http://%s (localhost-only)", s.addr)
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// handler builds the route mux (shared by Run and tests).
+func (s *Server) handler() http.Handler {
+	mux := http.NewServeMux()
+	s.routes(mux)
+	return mux
+}
+
+func (s *Server) routes(mux *http.ServeMux) {
+	// Root: WS upgrade (pi connects to ws://127.0.0.1:9742/?session=…) or info.
+	mux.HandleFunc("/", s.handleRoot)
+	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// pi-setup contract endpoints (drop-in for the M3 pi adapter).
+	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("GET /local-peers", s.handleLocalPeers)
+	mux.HandleFunc("GET /peers", s.handlePeers)
+	mux.HandleFunc("GET /history", s.handleHistory)
+	mux.HandleFunc("POST /send", s.handleSend)
+	// Canonical 29-op surface — every op via the single agent.Dispatch seam.
+	mux.HandleFunc("POST /op/{op}", s.handleOp)
+}
+
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if isWebSocketUpgrade(r) {
+		s.handleWS(w, r)
+		return
+	}
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": "attnd",
+		"address": s.ag.Address(),
+		"interfaces": map[string]any{
+			"rest": "POST /op/{name} (29 ops), POST /send, GET /status|/peers|/history|/local-peers",
+			"ws":   "ws on / (and /ws) — inbound event stream",
+		},
+	})
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// loopbackOnly refuses any bind that is not a loopback address (defense in depth:
+// the inbound message content is untrusted, so the interface must never be
+// reachable off-host). An empty host (e.g. ":9742" → all interfaces) is rejected.
+func loopbackOnly(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid http addr %q: %w", addr, err)
+	}
+	host = strings.TrimSpace(host)
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("refusing http bind %q: host must be a loopback IP or \"localhost\"", addr)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("refusing non-loopback http bind %q (localhost only)", addr)
+	}
+	return nil
+}

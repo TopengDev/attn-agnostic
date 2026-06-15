@@ -11,14 +11,23 @@ s0nderlabs relay + Base mainnet name registry** — with one-repo setup.
 > as a reusable Go core (and, later, a daemon + CLI + MCP server + per-harness
 > inbound adapters).
 
-**Status: M1 — daemon + SQLite state + full outbound 29-tool parity.** On top of
-the M0 protocol core, M1 adds the long-running `attnd` daemon (persistent relay
-connection with reconnect + backoff + watchdogs), a pure-Go SQLite state store
-(contacts, groups, history, inbox/outbox, mutes, key cache), a Base mainnet
-name-registrar client, and the complete **outbound** operation surface — all 29
-attn tools — driven and verified live against the real relay + Base. Inbound is
-received/decrypted/verified/stored/acked; realtime push to a harness and the
-HTTP/CLI/MCP interfaces are M2–M3. See `docs/ideation/05-build-plan.md`.
+**Status: M2 — the product interfaces (HTTP REST + WS inbound + CLI + MCP).** On
+top of the M1 daemon, M2 fronts the single `agent.Dispatch` seam with four
+interfaces, all on localhost: a **HTTP REST API** (`127.0.0.1:9742`) exposing all
+29 ops plus pi-compat endpoints; a **WebSocket inbound-event stream** on the same
+port whose frame shape matches pi-setup's existing extension (so the M3 pi adapter
+is drop-in) and carries a `steer`/`followUp` delivery-mode hint; a user-facing
+**`attn` CLI**; and an **`attn-mcp` MCP server** (stdio + streamable-HTTP/SSE)
+re-exposing the 29-tool surface to MCP-native harnesses (Claude Code, opencode,
+hermes). REST/CLI/MCP hold no business logic — every op flows through the one
+daemon. All four were verified live against the real relay (two daemons + a WS
+probe mimicking the pi extension). Paid name writes stay **gated**; servers bind
+loopback only. See `docs/ideation/05-build-plan.md`.
+
+> **M1** added the long-running `attnd` daemon (persistent relay connection with
+> reconnect + backoff + watchdogs), a pure-Go SQLite state store (contacts,
+> groups, history, inbox/outbox, mutes, key cache), a Base mainnet name-registrar
+> client, and the complete **outbound** 29-tool surface — driven + verified live.
 
 > **M0** proved the foundational, interop-critical layer: secp256k1 identity,
 > ECIES E2E encryption, the EIP-191 challenge-response handshake, and the relay
@@ -56,9 +65,14 @@ internal/store       SQLite state (modernc.org/sqlite, CGO-free): contacts, grou
 internal/names       Base mainnet AttnNames registrar client (read live; writes gated)
 internal/config      portable platform paths (XDG/%AppData%/~Library) + key load
 internal/agent       orchestrator: the 29 attn ops + inbound policy/persistence
+                     + the SurfaceEvent sink (inbound → adapters) + inbound files
+internal/httpapi     M2 product interface: localhost REST (all 29 ops + pi-compat)
+                     + WS inbound-event stream (pi frame shape + delivery-mode hint)
 internal/control     local Unix-socket JSON control plane (attnd ⇄ attnctl)
-cmd/attnd            M1 daemon (persistent connection + state + outbound surface)
-cmd/attnctl          control client to drive/verify the daemon's ops
+cmd/attnd            daemon: persistent connection + state + REST/WS interface
+cmd/attn             M2 user-facing CLI (thin client over the daemon's REST API)
+cmd/attn-mcp         M2 MCP server (stdio + streamable-HTTP/SSE), 29-tool surface
+cmd/attnctl          low-level control client to drive/verify the daemon's ops
 cmd/attn-smoke       M0 smoke + interop CLI
 testdata/interop     bun harness that generates real eciesjs/viem test vectors
 docs/ideation        vision, architecture, build plan, prototype findings
@@ -70,8 +84,10 @@ Requires Go 1.25+ (the pure-Go SQLite driver `modernc.org/sqlite` sets the floor
 
 ```sh
 go build ./...
-go build -o bin/attnd ./cmd/attnd
-go build -o bin/attnctl ./cmd/attnctl
+go build -o bin/attnd ./cmd/attnd        # daemon (REST + WS interface)
+go build -o bin/attn ./cmd/attn          # user-facing CLI
+go build -o bin/attn-mcp ./cmd/attn-mcp  # MCP server (stdio / HTTP)
+go build -o bin/attnctl ./cmd/attnctl    # low-level control client
 go build -o bin/attn-smoke ./cmd/attn-smoke
 ```
 
@@ -95,6 +111,39 @@ ATTN_HOME=~/.config/attn ./bin/attnd -gen-key &
 `register_name` / `transfer_name` / `set_primary_name` are **gated**: the daemon
 encodes + simulates the on-chain write and returns the calldata, but never
 broadcasts a paid mainnet transaction (registration costs 0.001 ETH, irreversible).
+
+## Interfaces (M2) — REST + WS + CLI + MCP
+
+The daemon serves a localhost-only product interface on `127.0.0.1:9742`
+(`ATTN_HTTP_ADDR` / `-http`; binds loopback only, refuses any public address).
+
+**HTTP REST** — every op via `POST /op/{name}` (`{ok,text,data}`), plus pi-compat
+endpoints (`POST /send`, `GET /status|/peers|/history|/local-peers`):
+
+```sh
+curl -s localhost:9742/status
+curl -s -XPOST localhost:9742/op/send -d '{"to":"alice.attn","message":"hi"}'
+```
+
+**WS inbound stream** — connect to `ws://127.0.0.1:9742/?session=<name>`; each
+inbound attn frame is pushed as JSON (`{type,from,message,trust,groupId,…}` +
+a `deliveryMode` hint of `steer`/`followUp`). The shape matches pi-setup's
+`extensions/attn/index.ts`, so its adapter is drop-in. (Inbound is **not** done
+over MCP — server-initiated MCP notifications don't reach the model.)
+
+**CLI** — a thin, scriptable client over the REST API:
+
+```sh
+./bin/attn send alice.attn "hello"      ./bin/attn contacts     ./bin/attn status
+./bin/attn history alice.attn --limit 20  ./bin/attn lookup alice.attn  --json
+```
+
+**MCP server** — re-exposes the 29 tools to MCP-native harnesses:
+
+```sh
+./bin/attn-mcp -transport stdio                 # for Claude Code / opencode
+./bin/attn-mcp -transport http -addr 127.0.0.1:9743   # /mcp (streamable) + /sse
+```
 
 ## Quickstart (`attn-smoke`)
 

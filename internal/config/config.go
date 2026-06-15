@@ -24,6 +24,7 @@ type Config struct {
 	DBPath   string // <Home>/attnd.db
 	InboxDir string // <Home>/inbox
 	SockPath string // <Home>/attnd.sock (control socket)
+	HTTPAddr string // localhost bind for the REST + WS product interface
 	RelayURL string
 	BaseRPC  string
 	ID       *identity.Identity
@@ -34,6 +35,9 @@ const (
 	DefaultRelayURL = "wss://attn.s0nderlabs.xyz/ws"
 	// DefaultBaseRPC is Base mainnet (shared/constants.ts: BASE_RPC_DEFAULT).
 	DefaultBaseRPC = "https://mainnet.base.org"
+	// DefaultHTTPAddr is the localhost REST+WS bind, matching pi-setup's existing
+	// `127.0.0.1:9742` daemon contract (extensions/attn/index.ts).
+	DefaultHTTPAddr = "127.0.0.1:9742"
 )
 
 // Home resolves attnd's base directory without loading anything. Precedence:
@@ -69,6 +73,7 @@ func Load(keyHex string, allowGenerate bool) (*Config, error) {
 		DBPath:   filepath.Join(home, "attnd.db"),
 		InboxDir: filepath.Join(home, "inbox"),
 		SockPath: filepath.Join(home, "attnd.sock"),
+		HTTPAddr: envOr("ATTN_HTTP_ADDR", DefaultHTTPAddr),
 		RelayURL: envOr("ATTN_RELAY_URL", DefaultRelayURL),
 		BaseRPC:  envOr("ATTN_BASE_RPC", DefaultBaseRPC),
 	}

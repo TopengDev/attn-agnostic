@@ -7,6 +7,8 @@
 /attn-smoke
 /attnd
 /attnctl
+/attn
+/attn-mcp
 
 # Go
 *.test

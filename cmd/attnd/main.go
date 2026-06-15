@@ -21,6 +21,7 @@ import (
 	"github.com/TopengDev/attn-agnostic/internal/agent"
 	"github.com/TopengDev/attn-agnostic/internal/config"
 	"github.com/TopengDev/attn-agnostic/internal/control"
+	"github.com/TopengDev/attn-agnostic/internal/httpapi"
 	"github.com/TopengDev/attn-agnostic/internal/store"
 )
 
@@ -29,6 +30,8 @@ func main() {
 		keyHex   = flag.String("key", "", "hex private key (overrides ATTN_PRIVATE_KEY and the key file)")
 		genKey   = flag.Bool("gen-key", false, "generate + persist a new identity if none is configured")
 		sockPath = flag.String("sock", "", "control socket path (default: <home>/attnd.sock)")
+		httpAddr = flag.String("http", "", "localhost REST+WS bind (default: 127.0.0.1:9742 / ATTN_HTTP_ADDR)")
+		noHTTP   = flag.Bool("no-http", false, "disable the REST+WS interface (control socket only)")
 	)
 	flag.Parse()
 
@@ -40,6 +43,9 @@ func main() {
 	}
 	if *sockPath != "" {
 		cfg.SockPath = *sockPath
+	}
+	if *httpAddr != "" {
+		cfg.HTTPAddr = *httpAddr
 	}
 	if err := os.MkdirAll(cfg.InboxDir, 0o700); err != nil {
 		logger.Fatalf("mkdir inbox: %v", err)
@@ -65,6 +71,20 @@ func main() {
 	logger.Printf("relay %s · base %s", cfg.RelayURL, cfg.BaseRPC)
 	logger.Printf("db %s", cfg.DBPath)
 	logger.Printf("control socket %s", cfg.SockPath)
+
+	// Product interface: localhost REST API (outbound + management) + WS inbound
+	// event stream. The agent surfaces inbound events to the WS hub.
+	if !*noHTTP {
+		httpSrv := httpapi.New(ag, cfg.HTTPAddr, logger)
+		ag.OnSurface(httpSrv.Broadcast)
+		go func() {
+			if err := httpSrv.Run(ctx); err != nil {
+				logger.Printf("http interface stopped: %v", err)
+				cancel() // a refused bind (e.g. non-loopback) is fatal — don't run blind
+			}
+		}()
+		logger.Printf("http interface %s", cfg.HTTPAddr)
+	}
 
 	// Control plane.
 	handler := makeHandler(ag, cancel, logger)
