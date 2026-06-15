@@ -36,21 +36,22 @@ func (c *captureDeliverer) count() int {
 	return len(c.frames)
 }
 
-// bob's relay identity — a syntactically valid lowercase address.
+// bobAddr is a syntactically valid lowercase address a (semi-trusted) local
+// session might try to CLAIM in order to intercept relay-bound sends.
 const bobAddr = "0x00000000000000000000000000000000000000b0"
 
-// TestSendLocalPrecedenceBypassesRelay is the CP4 proof: a send to a recipient
-// that is BOTH a local session AND has a relay identity routes LOCAL (relay
-// bypassed) — proven by (a) the local deliverer receiving the frame, (b) Send
-// reporting local:true, and (c) NO outbox entry (the relay-offline path would
-// have queued or errored). The relay is intentionally not ready (invalid URL),
-// so a local send that SUCCEEDS could only have bypassed the relay.
+// TestSendLocalPrecedenceBypassesRelay proves Layer-A routing is NAME-only and
+// relay-bypassed: a send to a local session by NAME routes local (proven by
+// (a) the local deliverer receiving the frame, (b) Send reporting local:true,
+// (c) NO outbox entry — the relay-offline path would have queued or errored).
+// The relay is intentionally not ready (invalid URL), so a local send that
+// SUCCEEDS could only have bypassed the relay.
 func TestSendLocalPrecedenceBypassesRelay(t *testing.T) {
 	a := newDLAgent(t, "wss://relay.invalid/ws")
 	reg := mesh.New()
 	a.SetMesh(reg, "main")
 	cap := &captureDeliverer{}
-	reg.Register(&mesh.Entry{Name: "bob", Address: bobAddr, Transport: mesh.TransportWS}, cap)
+	reg.Register(&mesh.Entry{Name: "bob", Transport: mesh.TransportWS}, cap)
 
 	ctx := context.Background()
 
@@ -70,15 +71,7 @@ func TestSendLocalPrecedenceBypassesRelay(t *testing.T) {
 		t.Errorf("local frame From = %q, want main (selfName)", f.From)
 	}
 
-	// (2) Send by ADDRESS that matches a local session → local (CC address-match).
-	if _, err := a.Send(ctx, bobAddr, "hello-by-addr"); err != nil {
-		t.Fatalf("Send(bobAddr) errored (should route local by address): %v", err)
-	}
-	if f, _ := cap.last(); f.Text != "hello-by-addr" {
-		t.Errorf("address-match local frame = %q, want hello-by-addr", f.Text)
-	}
-
-	// (3) NO relay frame was emitted: the outbox is empty (relay path would queue).
+	// (2) NO relay frame was emitted by the name send: outbox is empty.
 	outbox, err := a.st.GetOutbox()
 	if err != nil {
 		t.Fatalf("GetOutbox: %v", err)
@@ -87,24 +80,63 @@ func TestSendLocalPrecedenceBypassesRelay(t *testing.T) {
 		t.Errorf("outbox has %d entries — a relay send leaked (must be 0, fully bypassed)", len(outbox))
 	}
 
-	// (4) Explicit ".attn" suffix forces RELAY resolution (never local), even
-	// though a like-named local session exists — mirrors CC handleSend precedence.
+	// (3) Explicit ".attn" suffix forces RELAY resolution (never local), even
+	// though a like-named local session exists.
 	if _, err := a.Send(ctx, "bob.attn", "via-relay"); err == nil {
 		t.Error("Send(bob.attn) succeeded, want relay-resolution failure (no relay) — .attn must bypass local")
 	}
-	if got := cap.count(); got != 2 {
-		t.Errorf("local deliverer got %d frames, want 2 (bob.attn must NOT route local)", got)
+	if got := cap.count(); got != 1 {
+		t.Errorf("local deliverer got %d frames, want 1 (bob.attn must NOT route local)", got)
 	}
 
-	// (5) A non-local valid address goes to the RELAY path (and errors, since the
-	// relay is offline + no cached key) — proving only local-registry matches are
-	// bypassed.
+	// (4) A valid 0x address goes to the RELAY path (and errors, since the relay
+	// is offline + no cached key) — local routing is NAME-only.
 	_, err = a.Send(ctx, "0x000000000000000000000000000000000000dead", "to-relay")
 	if err == nil {
 		t.Error("Send(non-local addr) succeeded, want relay-offline error")
 	}
 	if !strings.Contains(err.Error(), "relay offline") {
 		t.Errorf("non-local send error = %v, want a relay-offline error", err)
+	}
+}
+
+// TestSendAddressShadowingDoesNotInterceptRelay is the M3-audit-M2 regression:
+// a local session must NOT be able to intercept a 0x-addressed (relay-bound)
+// send by claiming that address. Two structural guarantees are asserted:
+//
+//  1. mesh.Entry no longer carries a self-asserted address at all — the registry
+//     is name-keyed only, so there is nothing to match a 0x target against.
+//  2. agent.Send(<0x address>) ALWAYS takes the relay path even when a local
+//     session named exactly like that address string is registered — the local
+//     deliverer receives NOTHING, and the send fails relay-offline (no plaintext
+//     leaked to a local session).
+func TestSendAddressShadowingDoesNotInterceptRelay(t *testing.T) {
+	a := newDLAgent(t, "wss://relay.invalid/ws")
+	reg := mesh.New()
+	a.SetMesh(reg, "main")
+
+	// A malicious/buggy local session registers under a NAME that is literally a
+	// real remote peer's 0x address, the closest it can now get to "claiming" it.
+	shadow := &captureDeliverer{}
+	reg.Register(&mesh.Entry{Name: bobAddr, Transport: mesh.TransportWS}, shadow)
+
+	// Sending to that 0x address must hit the relay (offline → error), NOT the
+	// local shadow deliverer — a valid address is never name-resolved locally.
+	_, err := a.Send(context.Background(), bobAddr, "plaintext-for-remote-bob")
+	if err == nil {
+		t.Fatal("Send(0xbob) succeeded, want relay-offline error (must not route to a local shadow)")
+	}
+	if !strings.Contains(err.Error(), "relay offline") {
+		t.Errorf("Send(0xbob) error = %v, want relay-offline (relay path, not local)", err)
+	}
+	if shadow.count() != 0 {
+		t.Errorf("address-shadow local session intercepted %d frame(s) addressed to a remote 0x peer — MUST be 0", shadow.count())
+	}
+
+	// And the outbox stays empty (no cached key → cannot even queue), proving the
+	// plaintext was never handed to the local mesh.
+	if outbox, _ := a.st.GetOutbox(); len(outbox) != 0 {
+		t.Errorf("outbox has %d entries, want 0", len(outbox))
 	}
 }
 

@@ -90,13 +90,17 @@ func (s *Server) handleLocalPeers(w http.ResponseWriter, _ *http.Request) {
 // endpoint would turn the daemon into an SSRF relay). Last-registration-wins.
 //
 //	POST /local/register {name, harness?, endpoint, sessionId?}
+//
+// NOTE: any `address` field in the body is intentionally IGNORED. The local mesh
+// routes by NAME only — honoring a self-asserted relay address here would let a
+// local session shadow the encrypted relay path for a 0x-addressed send (M3
+// audit M2 — address-shadowing). A session's relay identity is the daemon's own.
 func (s *Server) handleLocalRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name      string `json:"name"`
 		Harness   string `json:"harness"`
 		Endpoint  string `json:"endpoint"`
 		SessionID string `json:"sessionId"`
-		Address   string `json:"address"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -111,7 +115,7 @@ func (s *Server) handleLocalRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mesh.Register(&mesh.Entry{
-		Name: body.Name, Harness: body.Harness, Transport: mesh.TransportHTTP, Address: body.Address,
+		Name: body.Name, Harness: body.Harness, Transport: mesh.TransportHTTP,
 	}, &httpDeliverer{endpoint: body.Endpoint, sessionID: body.SessionID, client: localInjectClient})
 	s.log.Printf("[mesh] http-target registered: %q (harness=%q endpoint=%q)", body.Name, body.Harness, body.Endpoint)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": body.Name, "transport": string(mesh.TransportHTTP)})

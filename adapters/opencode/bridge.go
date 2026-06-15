@@ -264,6 +264,20 @@ func (b *Bridge) HandleRaw(ctx context.Context, data []byte) {
 		b.Log.Printf("[bridge %s] local-ack to=%q delivered=%v (%s)", b.Name, f.To, f.Delivered, f.Detail)
 		return
 	}
+	// Self-echo guard (audit M3): never inject a frame that claims to originate
+	// from THIS session — a latent local-mesh injection loop if a session ever
+	// sends to its own name. Broadcast already excludes the sender by name; this
+	// is defense in depth (hermes + pi carry the same guard).
+	if f.From != "" && f.From == b.Name {
+		return
+	}
+	// Reactions are surfaced as a one-line notice, not a full message injection
+	// (audit M5; consistent with the pi adapter). A reaction frame is a
+	// type:"message" frame carrying trust:"reaction" + reactionMessageId.
+	if f.Trust == "reaction" {
+		b.injectReaction(ctx, f)
+		return
+	}
 	if !f.injectable() {
 		return
 	}
@@ -279,6 +293,27 @@ func (b *Bridge) HandleRaw(ctx context.Context, data []byte) {
 		scope = "local"
 	}
 	b.Log.Printf("[bridge %s] injected %s frame from %q (id=%s) → opencode %s", b.Name, scope, f.From, f.ID, b.SessionID)
+}
+
+// injectReaction surfaces a reaction frame as a brief one-line notice (NOT a full
+// message block) so a 👍 doesn't read as a new instruction-bearing message.
+func (b *Bridge) injectReaction(ctx context.Context, f InboundFrame) {
+	from := f.From
+	if f.AgentName != "" {
+		from = f.AgentName
+	}
+	if from == "" {
+		from = "unknown"
+	}
+	notice := fmt.Sprintf("📨 attn reaction · %s reacted %s", from, f.Message)
+	if f.ReactionFor != "" {
+		notice += fmt.Sprintf(" to message %s", f.ReactionFor)
+	}
+	ictx, cancel := context.WithTimeout(ctx, bridgeInjectGrace)
+	defer cancel()
+	if err := b.Inject.PromptAsync(ictx, b.SessionID, notice); err != nil {
+		b.Log.Printf("[bridge %s] reaction inject failed (from=%s): %v", b.Name, f.From, err)
+	}
 }
 
 func (b *Bridge) setConn(c *websocket.Conn) {

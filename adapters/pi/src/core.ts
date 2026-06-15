@@ -74,6 +74,8 @@ export interface InboundFrame {
   agentName?: string;
   groupId?: string;
   groupName?: string;
+  /** message id a reaction frame targets (trust:"reaction"). */
+  reactionMessageId?: string;
   local?: boolean;
 }
 
@@ -279,6 +281,12 @@ export class AttnMeshClient {
     }
     if (!msg || typeof msg !== 'object') return;
 
+    // Self-echo guard (audit M3): never inject a frame that claims to originate
+    // from THIS session — a latent local-mesh injection loop if a session ever
+    // sends to its own name. Broadcast already excludes the sender by name; this
+    // is defense in depth (the opencode + hermes adapters carry the same guard).
+    if (msg.from && this.session && msg.from === this.session) return;
+
     // File message (daemon already downloaded + decrypted + saved to disk).
     if (msg.type === 'file' && msg.from && msg.path) {
       this.lastInboundFrom = msg.from;
@@ -297,7 +305,8 @@ export class AttnMeshClient {
 
       // Reactions are surfaced as a one-line notice, not a full message block.
       if (msg.trust === 'reaction') {
-        this.inject(`[attn] ${name} reacted ${msg.message} to a message`);
+        const ref = msg.reactionMessageId ? ` (message ${msg.reactionMessageId})` : '';
+        this.inject(`[attn] ${name} reacted ${msg.message} to a message${ref}`);
         return;
       }
 

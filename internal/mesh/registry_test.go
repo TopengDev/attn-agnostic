@@ -43,7 +43,7 @@ func (c *capture) count() int {
 func TestRegisterLookupDeregister(t *testing.T) {
 	r := New()
 	cap := &capture{}
-	rel := r.Register(&Entry{Name: "bob", Harness: "pi", Transport: TransportWS, Address: "0xBOB"}, cap)
+	rel := r.Register(&Entry{Name: "bob", Harness: "pi", Transport: TransportWS}, cap)
 
 	e, ok := r.Lookup("bob")
 	if !ok {
@@ -52,15 +52,16 @@ func TestRegisterLookupDeregister(t *testing.T) {
 	if e.Harness != "pi" || e.Transport != TransportWS {
 		t.Errorf("entry metadata wrong: %+v", e)
 	}
-	if e.Address != "0xbob" {
-		t.Errorf("address not lowercased: %q", e.Address)
-	}
 	if e.RegisteredAt.IsZero() {
 		t.Error("RegisteredAt not stamped")
 	}
-	// Address-match lookup (case-insensitive).
-	if _, ok := r.LookupByAddress("0xBOB"); !ok {
-		t.Error("LookupByAddress(0xBOB) not found")
+	// Resolve is NAME-only (M3 audit M2): a bare name hits, a 0x address does NOT
+	// (it must take the relay path, never shadow it via the local registry).
+	if _, ok := r.Resolve("bob"); !ok {
+		t.Error("Resolve(bob) not found (name routing must work)")
+	}
+	if _, ok := r.Resolve("0xBOB"); ok {
+		t.Error("Resolve(0xBOB) matched — the mesh must NOT route by self-asserted address")
 	}
 	if r.Count() != 1 {
 		t.Errorf("Count = %d, want 1", r.Count())
@@ -174,7 +175,7 @@ func TestBroadcastBestEffort(t *testing.T) {
 
 func TestListAndNames(t *testing.T) {
 	r := New()
-	r.Register(&Entry{Name: "zeta", Harness: "opencode", Transport: TransportHTTP, Address: "0xZ"}, &capture{})
+	r.Register(&Entry{Name: "zeta", Harness: "opencode", Transport: TransportHTTP}, &capture{})
 	r.Register(&Entry{Name: "alpha", Harness: "pi", Transport: TransportWS}, &capture{})
 
 	names := r.Names()
@@ -185,7 +186,7 @@ func TestListAndNames(t *testing.T) {
 	if len(views) != 2 || views[0].Name != "alpha" || views[1].Name != "zeta" {
 		t.Errorf("List names = %v, want sorted [alpha zeta]", views)
 	}
-	if views[1].Address != "0xz" || views[1].Harness != "opencode" || views[1].Transport != TransportHTTP {
+	if views[1].Harness != "opencode" || views[1].Transport != TransportHTTP {
 		t.Errorf("zeta view wrong: %+v", views[1])
 	}
 }
@@ -226,7 +227,7 @@ func TestConcurrentRegistryRace(t *testing.T) {
 				_ = r.Broadcast(Frame{Text: "b"}, name)
 				_ = r.List()
 				_ = r.Names()
-				_, _ = r.LookupByAddress("0xdeadbeef")
+				_, _ = r.Resolve("nobody")
 				rel()
 			}
 		}(i)

@@ -10,8 +10,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func testCfg() Config {
@@ -98,9 +103,13 @@ func TestShouldForward(t *testing.T) {
 	}{
 		{"message ok", inboundFrame{Type: "message", Message: "hi", From: "alice"}, true},
 		{"local message ok", inboundFrame{Type: "message", Message: "hi", From: "opencode", Local: true}, true},
-		{"non-message type", inboundFrame{Type: "file", Message: "hi", From: "alice"}, false},
+		{"file with filename ok", inboundFrame{Type: "file", Filename: "doc.pdf", Path: "/tmp/doc.pdf", From: "alice"}, true},
+		{"file with path only ok", inboundFrame{Type: "file", Path: "/tmp/x", From: "alice"}, true},
+		{"file without filename or path", inboundFrame{Type: "file", Message: "hi", From: "alice"}, false},
+		{"reaction type dropped", inboundFrame{Type: "reaction", Message: "👍", From: "alice"}, false},
 		{"empty text", inboundFrame{Type: "message", Message: "   ", From: "alice"}, false},
 		{"self echo", inboundFrame{Type: "message", Message: "hi", From: "hermes"}, false},
+		{"self echo file", inboundFrame{Type: "file", Filename: "x", From: "hermes"}, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -248,6 +257,96 @@ func TestHandleFrameSkipsJunk(t *testing.T) {
 	cfg.TargetURL = srv.URL
 	b, _ := New(cfg)
 	b.handleFrame(context.Background(), []byte("not json"))
+	// file frame with no filename/path is not deliverable (nothing to reference).
 	b.handleFrame(context.Background(), []byte(`{"type":"file","message":"x","from":"a","id":"1"}`))
 	b.handleFrame(context.Background(), []byte(`{"type":"message","message":"","from":"a","id":"2"}`))
+	// reaction frames are dropped (the hermes agent run is message-driven).
+	b.handleFrame(context.Background(), []byte(`{"type":"reaction","message":"👍","from":"a","id":"3"}`))
+}
+
+// TestHandleFrameForwardsFile asserts a file frame is forwarded as a one-line
+// notice referencing the daemon-saved path (M3 audit M4 — hermes previously
+// dropped ALL non-message frames; opencode + pi surface files).
+func TestHandleFrameForwardsFile(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotBody []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotBody, _ = io.ReadAll(r.Body)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	cfg := testCfg()
+	cfg.TargetURL = srv.URL
+	b, _ := New(cfg)
+
+	frame, _ := json.Marshal(inboundFrame{
+		Type: "file", From: "alice", ID: "file-1",
+		Filename: "report.pdf", Path: "/tmp/attn/report.pdf", Size: 2048,
+	})
+	b.handleFrame(context.Background(), frame)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotBody == nil {
+		t.Fatal("file frame was not forwarded (got no POST)")
+	}
+	var p postBody
+	if err := json.Unmarshal(gotBody, &p); err != nil {
+		t.Fatalf("body not json: %v", err)
+	}
+	if p.From != "alice" {
+		t.Errorf("From = %q want alice", p.From)
+	}
+	for _, want := range []string{"report.pdf", "2048", "/tmp/attn/report.pdf"} {
+		if !strings.Contains(p.Message, want) {
+			t.Errorf("file notice %q missing %q", p.Message, want)
+		}
+	}
+}
+
+// TestRunOnceNoGoroutineLeak is the M3-audit-M1 regression: runOnce's
+// conn-watcher goroutine must be bound to a PER-CONNECTION ctx, so it exits when
+// the connection ends. Pre-fix it watched the process-lifetime ctx, leaking one
+// goroutine per reconnect. We drive many runOnce cycles against a server that
+// immediately closes each connection and assert the goroutine count does not
+// grow with the number of cycles.
+func TestRunOnceNoGoroutineLeak(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Drop the connection immediately so runOnce's read returns and it cycles.
+		_ = c.Close()
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	b, _ := New(testCfg())
+	ctx := context.Background() // long-lived: a leaked watcher would NOT exit on its own
+
+	// Warm up so one-time runtime goroutines are already started, then baseline.
+	_ = b.runOnce(ctx, wsURL)
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	base := runtime.NumGoroutine()
+
+	const cycles = 30
+	for i := 0; i < cycles; i++ {
+		_ = b.runOnce(ctx, wsURL)
+	}
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	got := runtime.NumGoroutine()
+
+	// Pre-fix this would grow by ~cycles (one leaked watcher each). Allow a small
+	// slack for scheduler/transport goroutines still winding down.
+	if got-base > 5 {
+		t.Errorf("goroutine leak across %d reconnects: base=%d got=%d (delta=%d, want <=5)", cycles, base, got, got-base)
+	}
 }

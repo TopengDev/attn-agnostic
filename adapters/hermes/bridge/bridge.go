@@ -75,6 +75,13 @@ const (
 	defaultPOSTTimeout     = 30 * time.Second
 	reconnectBaseDelay     = 1 * time.Second
 	reconnectMaxDelay      = 30 * time.Second
+	// WS read-loop liveness (mirrors the daemon/opencode pattern). The daemon
+	// pings every 30s; we reset the read deadline on each ping/pong/data frame so
+	// a half-open TCP (server vanished without a FIN) trips the deadline within
+	// readWait instead of hanging until OS keepalive.
+	readWait      = 90 * time.Second
+	writeWait     = 10 * time.Second
+	readLimitByte = 1 << 20 // 1 MiB, matches the daemon's maxBody
 	// seenCap bounds the local idempotency set so a long-lived bridge never
 	// grows unbounded. The receiver enforces real idempotency by X-Request-ID;
 	// this is only a defensive guard against reconnect replays.
@@ -110,7 +117,7 @@ func (c *Config) validate() error {
 }
 
 // inboundFrame is the daemon→subscriber WS frame (see internal/httpapi/ws.go
-// surfaceToFrame). We only act on type=="message".
+// surfaceToFrame). We act on type=="message" and type=="file".
 type inboundFrame struct {
 	Type         string `json:"type"`
 	From         string `json:"from"`
@@ -123,6 +130,11 @@ type inboundFrame struct {
 	AgentName    string `json:"agentName"`
 	GroupID      string `json:"groupId"`
 	GroupName    string `json:"groupName"`
+
+	// file frames (daemon already downloaded + decrypted + saved to disk).
+	Filename string `json:"filename"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
 }
 
 // postBody is the JSON the bridge POSTs to the hermes receiver. The stock
@@ -225,17 +237,43 @@ func (b *Bridge) runOnce(ctx context.Context, endpoint string) error {
 	b.cfg.Logger.Printf("[attn-hermes] subscribed to %s as session=%q harness=%q → %s",
 		b.cfg.DaemonWS, b.cfg.Session, b.cfg.Harness, b.cfg.TargetURL)
 
-	// Close the conn when ctx is cancelled so the blocking read returns.
+	// Per-CONNECTION ctx: the conn-watcher goroutine must observe THIS
+	// connection's teardown, not the process-lifetime ctx — otherwise every
+	// reconnect leaks one watcher pinning a closed conn (audit M1). The defer
+	// cancels connCtx when runOnce returns, so the watcher always exits. We still
+	// pass the PARENT ctx to handleFrame so an in-flight forward POST survives a
+	// WS reconnect (the message was already received).
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
-		<-ctx.Done()
+		<-connCtx.Done()
 		_ = conn.Close()
 	}()
+
+	// Read-loop liveness: bound the frame size + detect a dead peer via the read
+	// deadline. The daemon pings us (we send none), so the deadline is refreshed
+	// in the ping handler (which also replies with a pong via WriteControl — safe
+	// concurrent with SendLocal's writer) as well as on each pong/data frame.
+	conn.SetReadLimit(readLimitByte)
+	_ = conn.SetReadDeadline(time.Now().Add(readWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readWait))
+	})
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readWait))
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeWait))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		return err
+	})
 
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(readWait))
 		b.handleFrame(ctx, data)
 	}
 }
@@ -266,32 +304,44 @@ func (b *Bridge) handleFrame(ctx context.Context, data []byte) {
 		f.ID, f.From, f.Local, len(f.Message))
 }
 
-// shouldForward reports whether a frame is a deliverable inbound message.
-// Non-message types (file/reaction/typing) and self-originated echoes are
-// dropped. Empty-text messages are dropped (nothing to run on).
+// shouldForward reports whether a frame is a deliverable inbound. message and
+// file frames are forwarded (file as a one-line notice, consistent with the
+// opencode + pi adapters); reaction/typing/local-ack and self-originated echoes
+// are dropped, as are empty-bodied messages (nothing to run on).
 func (b *Bridge) shouldForward(f inboundFrame) bool {
-	if f.Type != "message" {
+	if f.From == b.cfg.Session { // self-echo guard (applies to every type)
 		return false
 	}
-	if strings.TrimSpace(f.Message) == "" {
+	switch f.Type {
+	case "message":
+		return strings.TrimSpace(f.Message) != ""
+	case "file":
+		return f.Filename != "" || f.Path != ""
+	default:
 		return false
 	}
-	if f.From == b.cfg.Session {
-		return false
-	}
-	return true
 }
 
-// buildPost composes the POST body for a frame.
+// buildPost composes the POST body for a frame. A file frame carries no message
+// text, so we synthesize a one-line notice (mirroring the opencode renderer +
+// the pi 📎 notice) referencing the daemon-saved path the agent can read.
 func (b *Bridge) buildPost(f inboundFrame) postBody {
 	sess := b.cfg.SessionKeyOverride
 	if sess == "" {
 		sess = b.cfg.Session
 	}
+	msg := f.Message
+	if f.Type == "file" {
+		name := f.Filename
+		if name == "" {
+			name = f.Path
+		}
+		msg = fmt.Sprintf("[received file: %s (%d bytes) at %s]", name, f.Size, f.Path)
+	}
 	return postBody{
 		Session: sess,
 		From:    f.From,
-		Message: f.Message,
+		Message: msg,
 		ID:      f.ID,
 		Ts:      f.Ts,
 		Local:   f.Local,

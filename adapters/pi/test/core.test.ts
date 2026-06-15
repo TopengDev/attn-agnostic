@@ -316,6 +316,55 @@ test('malformed / incomplete inbound frames are ignored (untrusted-input safety)
   await d.close();
 });
 
+test('self-echo frame (from === own session) is NOT injected (audit M3)', async () => {
+  const d = await startMockDaemon();
+  const host = recordingHost();
+  const client = makeClient(d, host); // session defaults to 'pi-test'
+  client.start();
+  await waitFor(() => client.isConnected());
+
+  // A frame claiming to come from THIS session must be dropped (injection-loop
+  // guard); a frame from a real peer with the same body must still inject.
+  d.push({ type: 'message', from: 'pi-test', message: 'my own echo', local: true, id: 'se1' });
+  d.push({ type: 'message', from: 'main', message: 'peer message', local: true, id: 'se2' });
+
+  await waitFor(() => host.calls.length > 0);
+  await sleep(80); // let any erroneous extra injection land
+  assert.equal(host.calls.length, 1, 'only the peer frame should inject (self-echo dropped)');
+  assert.match(host.calls[0].text, /peer message/);
+  assert.equal(client.lastInboundFrom, 'main', 'self-echo must not even update lastInboundFrom');
+
+  client.stop();
+  await d.close();
+});
+
+test('reaction frame → one-line notice carrying reactionMessageId (audit M6)', async () => {
+  const d = await startMockDaemon();
+  const host = recordingHost();
+  const client = makeClient(d, host);
+  client.start();
+  await waitFor(() => client.isConnected());
+
+  d.push({
+    type: 'message',
+    from: 'alice.attn',
+    message: '👍',
+    trust: 'reaction',
+    reactionMessageId: 'm42',
+    id: 'rx1',
+  });
+  await waitFor(() => host.calls.length > 0);
+
+  const txt = host.calls[0].text;
+  assert.match(txt, /reacted/);
+  assert.match(txt, /👍/);
+  assert.match(txt, /m42/, 'reactionMessageId must be threaded into the notice');
+  assert.doesNotMatch(txt, /Message from/, 'a reaction must be a notice, not a full message block');
+
+  client.stop();
+  await d.close();
+});
+
 test('auto-reconnects after the socket drops', async () => {
   const d = await startMockDaemon();
   const client = makeClient(d, recordingHost(), 'pi-test', 120);

@@ -70,12 +70,19 @@ type Deliverer interface {
 
 // Entry is a registered local session. The deliver handle is unexported so it is
 // never copied out by List/snapshots (callers route through the Registry).
+//
+// NOTE: there is intentionally NO self-asserted relay address here. The local
+// mesh routes by NAME only. A session's relay identity is the daemon's own
+// address (all local sessions share one daemon), so a per-session "address"
+// would be both redundant AND a routing hazard: an unproven self-asserted
+// address could shadow the encrypted relay path for a 0x-addressed send (M3
+// audit M2 — address-shadowing). Routing precedence (agent.Send) therefore
+// sends every 0x/.attn target to the relay and only bare local NAMES to the mesh.
 type Entry struct {
 	Name         string
 	Harness      string // best-effort harness label ("pi", "opencode", "hermes", "" = unknown)
 	Transport    Transport
-	Address      string // optional relay identity (lowercased) — enables address-match routing
-	PID          int    // optional process id (0 = unknown)
+	PID          int // optional process id (0 = unknown)
 	RegisteredAt time.Time
 
 	deliver Deliverer
@@ -86,7 +93,6 @@ type View struct {
 	Name         string    `json:"name"`
 	Harness      string    `json:"harness,omitempty"`
 	Transport    Transport `json:"transport"`
-	Address      string    `json:"address,omitempty"`
 	PID          int       `json:"pid,omitempty"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
@@ -116,9 +122,6 @@ func (r *Registry) Register(e *Entry, d Deliverer) (release func()) {
 	e.deliver = d
 	if e.RegisteredAt.IsZero() {
 		e.RegisteredAt = time.Now()
-	}
-	if e.Address != "" {
-		e.Address = strings.ToLower(strings.TrimSpace(e.Address))
 	}
 	r.mu.Lock()
 	r.entries[e.Name] = e
@@ -153,31 +156,13 @@ func (r *Registry) Lookup(name string) (*Entry, bool) {
 	return e, ok
 }
 
-// LookupByAddress returns the (first) entry whose relay identity matches addr
-// (case-insensitive). Used for CC-style address-match routing precedence.
-func (r *Registry) LookupByAddress(addr string) (*Entry, bool) {
-	addr = strings.ToLower(strings.TrimSpace(addr))
-	if addr == "" {
-		return nil, false
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, e := range r.entries {
-		if e.Address != "" && e.Address == addr {
-			return e, true
-		}
-	}
-	return nil, false
-}
-
-// Resolve looks up a routing target by either session name or relay address,
-// mirroring CC handleSend: a bare name resolves by name; a 0x... target resolves
-// by address.
+// Resolve looks up a routing target by session NAME only. The local mesh is
+// deliberately name-routed: it does NOT honor a self-asserted relay address for
+// routing precedence (that would let a local session shadow the encrypted relay
+// path for a 0x-addressed send — M3 audit M2). Callers (agent.Send) must send
+// every 0x address / .attn name to the relay and only bare local names here.
 func (r *Registry) Resolve(to string) (*Entry, bool) {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(to)), "0x") {
-		return r.LookupByAddress(to)
-	}
-	return r.Lookup(to)
+	return r.Lookup(strings.TrimSpace(to))
 }
 
 // RouteTo delivers f to a specific entry (caller already resolved it).
@@ -234,7 +219,7 @@ func (r *Registry) List() []View {
 	for _, e := range r.entries {
 		views = append(views, View{
 			Name: e.Name, Harness: e.Harness, Transport: e.Transport,
-			Address: e.Address, PID: e.PID, RegisteredAt: e.RegisteredAt,
+			PID: e.PID, RegisteredAt: e.RegisteredAt,
 		})
 	}
 	r.mu.RUnlock()

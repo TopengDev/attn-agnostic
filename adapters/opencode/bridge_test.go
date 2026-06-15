@@ -91,6 +91,45 @@ func TestHandleRawSkipsNonInjectable(t *testing.T) {
 	}
 }
 
+// TestHandleRawSkipsSelfEcho is the audit-M3 regression: a frame whose `from`
+// equals this session's own name must NOT be injected (a latent local-mesh
+// injection loop if a session ever sends to its own name).
+func TestHandleRawSkipsSelfEcho(t *testing.T) {
+	inj := &fakeInjector{}
+	b := newTestBridge(inj) // Name: "oc-a"
+	b.HandleRaw(context.Background(), []byte(`{"type":"message","from":"oc-a","message":"echo of my own send","local":true,"id":"e1"}`))
+	if got := inj.snapshot(); len(got) != 0 {
+		t.Fatalf("self-echo frame was injected (%d) — must be dropped", len(got))
+	}
+	// A DIFFERENT sender with the same body still injects (guard is exact-name).
+	b.HandleRaw(context.Background(), []byte(`{"type":"message","from":"oc-b","message":"from a peer","local":true,"id":"e2"}`))
+	if got := inj.snapshot(); len(got) != 1 {
+		t.Fatalf("peer frame should inject, got %d", len(got))
+	}
+}
+
+// TestHandleRawReactionRendersNotice is the audit-M5 regression: a reaction
+// frame (type:message + trust:reaction) is surfaced as a brief one-line notice,
+// NOT injected as a full message block.
+func TestHandleRawReactionRendersNotice(t *testing.T) {
+	inj := &fakeInjector{}
+	b := newTestBridge(inj)
+	b.HandleRaw(context.Background(), []byte(`{"type":"message","from":"alice","agentName":"alice.attn","message":"👍","trust":"reaction","reactionMessageId":"m9","id":"r1"}`))
+	calls := inj.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("want 1 reaction notice, got %d", len(calls))
+	}
+	txt := calls[0].text
+	if !strings.Contains(txt, "reaction") || !strings.Contains(txt, "👍") || !strings.Contains(txt, "m9") {
+		t.Errorf("reaction notice missing parts: %q", txt)
+	}
+	// A full message injection would carry the Render provenance header
+	// "📨 attn inbound"; a reaction must NOT (it is "📨 attn reaction").
+	if strings.Contains(txt, "attn inbound") {
+		t.Errorf("reaction was injected as a full message block, want a brief notice: %q", txt)
+	}
+}
+
 func TestHandleRawInjectErrorIsNonFatal(t *testing.T) {
 	inj := &fakeInjector{err: io.ErrClosedPipe}
 	b := newTestBridge(inj)

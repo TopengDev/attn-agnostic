@@ -98,14 +98,17 @@ func (a *Agent) Dispatch(ctx context.Context, op string, args map[string]any) (R
 // ── messaging ────────────────────────────────────────────────────────────
 
 // Send delivers a message to a local session (Layer-A mesh, relay-bypassed), an
-// address, or a .attn name. Routing precedence mirrors the upstream CC
-// handleSend: (1) "all" → local broadcast over the registry minus this session;
-// (2) a recipient that resolves to a LOCAL session (a bare name registered
-// locally, or a 0x address matching a registered session) is delivered locally,
-// bypassing the relay; (3) everything else goes to the relay unchanged. An
-// explicit ".attn" suffix always means relay name-resolution (never local), so
-// the operator can force a relay send even when a like-named local session
-// exists.
+// address, or a .attn name. Routing precedence: (1) "all" → local broadcast over
+// the registry minus this session; (2) a recipient that is a bare local session
+// NAME is delivered locally, bypassing the relay; (3) everything else (a 0x
+// address, a .attn name, or an unknown name) goes to the relay unchanged.
+//
+// The local mesh is routed by NAME ONLY — a 0x-address target ALWAYS goes to the
+// (encrypted) relay, never to a local session that merely claimed that address.
+// Honoring a self-asserted address for local routing would let a buggy/semi-
+// trusted local session intercept plaintext addressed to a real (possibly
+// REMOTE) peer (M3 audit M2 — address-shadowing). An explicit ".attn" suffix
+// likewise always forces relay name-resolution.
 func (a *Agent) Send(ctx context.Context, to, message string) (Result, error) {
 	if to == "" {
 		return Result{}, fmt.Errorf("recipient is required")
@@ -115,7 +118,9 @@ func (a *Agent) Send(ctx context.Context, to, message string) (Result, error) {
 		if to == "all" {
 			return a.sendLocalBroadcast(reg, self, message)
 		}
-		if !strings.HasSuffix(strings.ToLower(to), ".attn") {
+		// Local mesh = NAME-routed only. A 0x address or a ".attn" name is NEVER
+		// resolved against the local registry; it always takes the relay path.
+		if !isValidAddress(to) && !strings.HasSuffix(strings.ToLower(to), ".attn") {
 			if entry, ok := reg.Resolve(to); ok {
 				return a.sendLocalTo(reg, entry, self, message)
 			}
@@ -726,13 +731,10 @@ func (a *Agent) Peers() (Result, error) {
 		if v.Harness != "" {
 			line += " [" + v.Harness + "]"
 		}
-		if v.Address != "" {
-			line += " " + v.Address
-		}
 		fmt.Fprintf(&b, "  %s%s\n", marker, line)
 		peers = append(peers, map[string]any{
 			"name": v.Name, "harness": v.Harness, "transport": string(v.Transport),
-			"address": v.Address, "online": true,
+			"online": true,
 		})
 	}
 	return Result{Text: b.String(), Data: map[string]any{"peers": peers, "count": len(views)}}, nil

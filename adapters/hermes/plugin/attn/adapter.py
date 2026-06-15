@@ -83,6 +83,12 @@ DEFAULT_CHANNEL = "attn"
 DEFAULT_DAEMON_URL = "http://127.0.0.1:9742"
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _IDEMPOTENCY_TTL = 3600  # seconds
+# Hard size cap on the idempotency set. The TTL sweep alone is unbounded under a
+# sustained high inbound rate (rate*TTL entries), so we also cap the dict and,
+# when over, keep only the most-recent entries (the ones most likely to be
+# replayed). HMAC + the loopback bind already gate this to authenticated senders;
+# this mirrors the Go bridge's bounded `seen` set (seenCap). Audit Low.
+_IDEMPOTENCY_MAX = 8192
 
 _LOOPBACK_HOSTS = frozenset({
     "127.0.0.1", "localhost", "::1", "ip6-localhost", "ip6-loopback",
@@ -200,6 +206,12 @@ class AttnAdapter(BasePlatformAdapter):
         if self._seen:
             cutoff = now - _IDEMPOTENCY_TTL
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+            # Hard size cap on top of the TTL sweep: if a sustained burst within
+            # the TTL window grew the set past the cap, keep only the most-recent
+            # _IDEMPOTENCY_MAX entries (by first-seen timestamp).
+            if len(self._seen) > _IDEMPOTENCY_MAX:
+                newest = sorted(self._seen.items(), key=lambda kv: kv[1], reverse=True)[:_IDEMPOTENCY_MAX]
+                self._seen = dict(newest)
         if request_id in self._seen:
             return True
         self._seen[request_id] = now
