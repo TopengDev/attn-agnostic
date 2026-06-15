@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	icrypto "github.com/TopengDev/attn-agnostic/internal/crypto"
+	"github.com/TopengDev/attn-agnostic/internal/mesh"
 	"github.com/TopengDev/attn-agnostic/internal/names"
 	"github.com/TopengDev/attn-agnostic/internal/store"
 )
@@ -96,13 +97,31 @@ func (a *Agent) Dispatch(ctx context.Context, op string, args map[string]any) (R
 
 // ── messaging ────────────────────────────────────────────────────────────
 
-// Send delivers a message to an address or .attn name.
+// Send delivers a message to a local session (Layer-A mesh, relay-bypassed), an
+// address, or a .attn name. Routing precedence mirrors the upstream CC
+// handleSend: (1) "all" → local broadcast over the registry minus this session;
+// (2) a recipient that resolves to a LOCAL session (a bare name registered
+// locally, or a 0x address matching a registered session) is delivered locally,
+// bypassing the relay; (3) everything else goes to the relay unchanged. An
+// explicit ".attn" suffix always means relay name-resolution (never local), so
+// the operator can force a relay send even when a like-named local session
+// exists.
 func (a *Agent) Send(ctx context.Context, to, message string) (Result, error) {
 	if to == "" {
 		return Result{}, fmt.Errorf("recipient is required")
 	}
-	if to == "all" {
-		return Result{}, fmt.Errorf("local broadcast (\"all\") is local-mesh — deferred to M3")
+
+	if reg, self := a.meshAndSelf(); reg != nil {
+		if to == "all" {
+			return a.sendLocalBroadcast(reg, self, message)
+		}
+		if !strings.HasSuffix(strings.ToLower(to), ".attn") {
+			if entry, ok := reg.Resolve(to); ok {
+				return a.sendLocalTo(reg, entry, self, message)
+			}
+		}
+	} else if to == "all" {
+		return Result{}, fmt.Errorf(`local broadcast ("all") requires the local mesh (the HTTP/WS interface) — unavailable in control-only mode`)
 	}
 
 	addr := to
@@ -159,6 +178,51 @@ func (a *Agent) Send(ctx context.Context, to, message string) (Result, error) {
 	a.addContactAndFlush(ctx, addr, "")
 	return Result{Text: fmt.Sprintf("Message queued for %s (relay offline). Will send on reconnect.", display),
 		Data: map[string]any{"id": id, "status": "queued"}}, nil
+}
+
+// meshAndSelf returns the wired local-mesh registry + this daemon's session name
+// under the agent lock (both are set once at startup via SetMesh).
+func (a *Agent) meshAndSelf() (*mesh.Registry, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mesh, a.selfName
+}
+
+// sendLocalTo delivers message to exactly one local session, bypassing the relay
+// entirely (no encryption, no outbox, same-host). It persists to history under a
+// `local:<name>` peer key so a local thread is distinguishable from a relay one.
+func (a *Agent) sendLocalTo(reg *mesh.Registry, entry *mesh.Entry, self, message string) (Result, error) {
+	id := a.sess.NewMessageID()
+	frame := mesh.Frame{
+		ID: id, From: self, FromAddress: a.Address(),
+		Text: message, Ts: time.Now().UnixMilli(),
+	}
+	if err := reg.RouteTo(entry, frame); err != nil {
+		return Result{}, fmt.Errorf("local delivery to %q failed: %w", entry.Name, err)
+	}
+	_ = a.st.SaveMessage(id, "local:"+entry.Name, "outbound", message, "")
+	return Result{
+		Text: fmt.Sprintf("Message sent to local session %q (relay bypassed)", entry.Name),
+		Data: map[string]any{"id": id, "status": "delivered", "local": true, "to": entry.Name},
+	}, nil
+}
+
+// sendLocalBroadcast fans message out to every local session except this one.
+func (a *Agent) sendLocalBroadcast(reg *mesh.Registry, self, message string) (Result, error) {
+	id := a.sess.NewMessageID()
+	frame := mesh.Frame{
+		ID: id, From: self, FromAddress: a.Address(),
+		Text: message, Ts: time.Now().UnixMilli(), Broadcast: true,
+	}
+	sent := reg.Broadcast(frame, self)
+	if len(sent) == 0 {
+		return Result{}, fmt.Errorf("no local peers are running")
+	}
+	_ = a.st.SaveMessage(id, "local:all", "outbound", message, "")
+	return Result{
+		Text: fmt.Sprintf("Message broadcast to %d local session(s): %s", len(sent), strings.Join(sent, ", ")),
+		Data: map[string]any{"id": id, "status": "delivered", "local": true, "recipients": len(sent), "sessions": sent},
+	}, nil
 }
 
 // Reply sends to the most recent inbound sender (or group).
@@ -638,10 +702,40 @@ func (a *Agent) Groups() (Result, error) {
 	return Result{Text: b.String(), Data: map[string]any{"groups": len(groups), "invites": len(invites)}}, nil
 }
 
-// Peers is the local-mesh discovery op — deferred to M3.
+// Peers is the Layer-A local-mesh discovery op: it enumerates the live registry
+// of named local sessions (name, harness, transport, relay address, online).
 func (a *Agent) Peers() (Result, error) {
-	return Result{Text: "peers: local-mesh (Layer A) discovery is deferred to M3 — not yet available.",
-		Data: map[string]any{"peers": []any{}, "stub": true}}, nil
+	reg, self := a.meshAndSelf()
+	if reg == nil {
+		return Result{Text: "Local mesh is not enabled (control-only mode — no HTTP/WS interface).",
+			Data: map[string]any{"peers": []any{}, "count": 0}}, nil
+	}
+	views := reg.List()
+	peers := make([]map[string]any, 0, len(views))
+	var b strings.Builder
+	fmt.Fprintf(&b, "Local sessions (%d):\n", len(views))
+	if len(views) == 0 {
+		b.WriteString("  (none)\n")
+	}
+	for _, v := range views {
+		marker := "  "
+		if v.Name == self {
+			marker = "→ "
+		}
+		line := v.Name
+		if v.Harness != "" {
+			line += " [" + v.Harness + "]"
+		}
+		if v.Address != "" {
+			line += " " + v.Address
+		}
+		fmt.Fprintf(&b, "  %s%s\n", marker, line)
+		peers = append(peers, map[string]any{
+			"name": v.Name, "harness": v.Harness, "transport": string(v.Transport),
+			"address": v.Address, "online": true,
+		})
+	}
+	return Result{Text: b.String(), Data: map[string]any{"peers": peers, "count": len(views)}}, nil
 }
 
 // ── names (Base) ─────────────────────────────────────────────────────────

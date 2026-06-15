@@ -22,6 +22,7 @@ import (
 	"github.com/TopengDev/attn-agnostic/internal/config"
 	"github.com/TopengDev/attn-agnostic/internal/control"
 	"github.com/TopengDev/attn-agnostic/internal/httpapi"
+	"github.com/TopengDev/attn-agnostic/internal/mesh"
 	"github.com/TopengDev/attn-agnostic/internal/store"
 )
 
@@ -73,9 +74,15 @@ func main() {
 	logger.Printf("control socket %s", cfg.SockPath)
 
 	// Product interface: localhost REST API (outbound + management) + WS inbound
-	// event stream. The agent surfaces inbound events to the WS hub.
+	// event stream. The agent surfaces inbound events to the WS hub. The Layer-A
+	// local-mesh registry is shared between the HTTP/WS interface (WS
+	// self-registration + http-target registration + local routing) and the agent
+	// (Send precedence + peers + send-all), so a local recipient is delivered
+	// same-host, relay-bypassed. Without the interface there is no local mesh.
 	if !*noHTTP {
-		httpSrv := httpapi.New(ag, cfg.HTTPAddr, logger)
+		reg := mesh.New()
+		ag.SetMesh(reg, cfg.SelfName)
+		httpSrv := httpapi.New(ag, cfg.HTTPAddr, logger, reg)
 		ag.OnSurface(httpSrv.Broadcast)
 		go func() {
 			if err := httpSrv.Run(ctx); err != nil {
@@ -83,7 +90,7 @@ func main() {
 				cancel() // a refused bind (e.g. non-loopback) is fatal — don't run blind
 			}
 		}()
-		logger.Printf("http interface %s", cfg.HTTPAddr)
+		logger.Printf("http interface %s (local-mesh session name %q)", cfg.HTTPAddr, cfg.SelfName)
 	}
 
 	// Control plane.

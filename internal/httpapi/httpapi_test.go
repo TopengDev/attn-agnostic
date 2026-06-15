@@ -16,6 +16,7 @@ import (
 	"github.com/TopengDev/attn-agnostic/internal/agent"
 	"github.com/TopengDev/attn-agnostic/internal/config"
 	"github.com/TopengDev/attn-agnostic/internal/identity"
+	"github.com/TopengDev/attn-agnostic/internal/mesh"
 	"github.com/TopengDev/attn-agnostic/internal/store"
 )
 
@@ -37,7 +38,9 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		InboxDir: t.TempDir(),
 	}
 	ag := agent.New(cfg, st, log.New(io.Discard, "", 0))
-	return New(ag, "127.0.0.1:0", log.New(io.Discard, "", 0)), st
+	reg := mesh.New()
+	ag.SetMesh(reg, "daemon")
+	return New(ag, "127.0.0.1:0", log.New(io.Discard, "", 0), reg), st
 }
 
 func TestLoopbackOnly(t *testing.T) {

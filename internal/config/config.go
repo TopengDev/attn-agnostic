@@ -25,6 +25,7 @@ type Config struct {
 	InboxDir string // <Home>/inbox
 	SockPath string // <Home>/attnd.sock (control socket)
 	HTTPAddr string // localhost bind for the REST + WS product interface
+	SelfName string // this daemon's local-mesh session name (ATTN_SESSION, default "main")
 	RelayURL string
 	BaseRPC  string
 	ID       *identity.Identity
@@ -74,6 +75,7 @@ func Load(keyHex string, allowGenerate bool) (*Config, error) {
 		InboxDir: filepath.Join(home, "inbox"),
 		SockPath: filepath.Join(home, "attnd.sock"),
 		HTTPAddr: envOr("ATTN_HTTP_ADDR", DefaultHTTPAddr),
+		SelfName: envOr("ATTN_SESSION", "main"),
 		RelayURL: envOr("ATTN_RELAY_URL", DefaultRelayURL),
 		BaseRPC:  envOr("ATTN_BASE_RPC", DefaultBaseRPC),
 	}

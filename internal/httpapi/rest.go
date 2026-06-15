@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/TopengDev/attn-agnostic/internal/mesh"
 )
 
 const (
@@ -73,10 +75,65 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// handleLocalPeers → {sessions,count}. Local mesh (Layer A) is M3; the endpoint
-// exists so the pi adapter's routing probe degrades cleanly to relay-only.
+// handleLocalPeers → {sessions,count} (pi contract: sessions is a []string of
+// names; the pi adapter filters its own ATTN_SESSION out). Enumerates the live
+// Layer-A registry.
 func (s *Server) handleLocalPeers(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": []string{}, "count": 0})
+	names := s.mesh.Names()
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": names, "count": len(names)})
+}
+
+// handleLocalRegister registers an http-target local session (opencode/hermes
+// adapters the daemon drives over HTTP — vs pi's WS self-registration). The
+// daemon delivers routed local frames by POSTing them to the registered
+// `endpoint`, which MUST be loopback (the mesh is same-host only; an off-host
+// endpoint would turn the daemon into an SSRF relay). Last-registration-wins.
+//
+//	POST /local/register {name, harness?, endpoint, sessionId?}
+func (s *Server) handleLocalRegister(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name      string `json:"name"`
+		Harness   string `json:"harness"`
+		Endpoint  string `json:"endpoint"`
+		SessionID string `json:"sessionId"`
+		Address   string `json:"address"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if body.Name == "" || body.Endpoint == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "name and endpoint are required"})
+		return
+	}
+	if err := loopbackEndpoint(body.Endpoint); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	s.mesh.Register(&mesh.Entry{
+		Name: body.Name, Harness: body.Harness, Transport: mesh.TransportHTTP, Address: body.Address,
+	}, &httpDeliverer{endpoint: body.Endpoint, sessionID: body.SessionID, client: localInjectClient})
+	s.log.Printf("[mesh] http-target registered: %q (harness=%q endpoint=%q)", body.Name, body.Harness, body.Endpoint)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": body.Name, "transport": string(mesh.TransportHTTP)})
+}
+
+// handleLocalDeregister removes an http-target (or any) local session by name.
+//
+//	POST /local/deregister {name}
+func (s *Server) handleLocalDeregister(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "name is required"})
+		return
+	}
+	removed := s.mesh.DeregisterByName(body.Name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": body.Name, "removed": removed})
 }
 
 // handlePeers → {peers:[{address,name,added_at}]} (pi contract; = contacts).

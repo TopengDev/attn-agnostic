@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TopengDev/attn-agnostic/internal/agent"
+	"github.com/TopengDev/attn-agnostic/internal/mesh"
 )
 
 // Server is the localhost REST + WS interface in front of one Agent.
@@ -28,14 +29,21 @@ type Server struct {
 	addr string
 	log  *log.Logger
 	hub  *Hub
+	mesh *mesh.Registry
 }
 
 // New builds the interface server. addr MUST be a loopback bind (enforced in Run).
-func New(ag *agent.Agent, addr string, logger *log.Logger) *Server {
+// reg is the shared Layer-A local-mesh registry (the WS hub self-registers
+// subscribers into it; the same registry must be wired into the agent via
+// ag.SetMesh so Send/peers see the live sessions). A nil reg disables local mesh.
+func New(ag *agent.Agent, addr string, logger *log.Logger, reg *mesh.Registry) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Server{ag: ag, addr: addr, log: logger, hub: newHub(logger)}
+	if reg == nil {
+		reg = mesh.New()
+	}
+	return &Server{ag: ag, addr: addr, log: logger, hub: newHub(logger, reg, ag), mesh: reg}
 }
 
 // Broadcast pushes a surfaced inbound event to all WS subscribers. Wire this as
@@ -120,6 +128,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /peers", s.handlePeers)
 	mux.HandleFunc("GET /history", s.handleHistory)
 	mux.HandleFunc("POST /send", s.handleSend)
+	// Layer-A local-mesh control: http-target self-registration (opencode/hermes
+	// adapters that the daemon drives over HTTP, vs pi-style WS self-registration).
+	mux.HandleFunc("POST /local/register", s.handleLocalRegister)
+	mux.HandleFunc("POST /local/deregister", s.handleLocalDeregister)
 	// Canonical 29-op surface — every op via the single agent.Dispatch seam.
 	mux.HandleFunc("POST /op/{op}", s.handleOp)
 }

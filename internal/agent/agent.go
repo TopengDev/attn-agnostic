@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TopengDev/attn-agnostic/internal/config"
+	"github.com/TopengDev/attn-agnostic/internal/mesh"
 	"github.com/TopengDev/attn-agnostic/internal/names"
 	"github.com/TopengDev/attn-agnostic/internal/relay"
 	"github.com/TopengDev/attn-agnostic/internal/store"
@@ -46,6 +47,14 @@ type Agent struct {
 	surfaceSink          func(SurfaceEvent)
 	rootCtx              context.Context // agent lifecycle ctx (set in Start) for inbound downloads
 	downloadSem          chan struct{}   // bounds concurrent inbound-file downloads (audit M-flood)
+
+	// Layer-A local mesh (M3): the shared registry of named local sessions, plus
+	// this daemon's own session name (used as the sender label + broadcast-self
+	// exclusion when a local send is driven through the agent's Send seam, à la
+	// CC's `state.sessionName ?? 'main'`). nil mesh ⇒ local routing disabled
+	// (e.g. --no-http control-only runs); Send falls back to relay.
+	mesh     *mesh.Registry
+	selfName string
 }
 
 // maxInboundDownloads caps concurrent inbound-file downloads so a contact cannot
@@ -76,6 +85,31 @@ func New(cfg *config.Config, st *store.Store, logger *log.Logger) *Agent {
 
 // Session exposes the relay session (for the daemon's control hooks).
 func (a *Agent) Session() *relay.Session { return a.sess }
+
+// SetMesh wires the Layer-A local-mesh registry and this daemon's own session
+// name (selfName, default "main" — set by the daemon from ATTN_SESSION). Once
+// set, Send routes local-registry matches locally (bypassing the relay) and
+// send("all") fans out over the registry. Safe to call before Start.
+func (a *Agent) SetMesh(reg *mesh.Registry, selfName string) {
+	a.mu.Lock()
+	a.mesh = reg
+	if selfName == "" {
+		selfName = "main"
+	}
+	a.selfName = selfName
+	a.mu.Unlock()
+}
+
+// Mesh returns the wired local-mesh registry (nil if local mesh is disabled).
+func (a *Agent) Mesh() *mesh.Registry {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mesh
+}
+
+// NewMessageID mints a fresh message id (UUIDv4 via the relay session). Used by
+// the local-mesh WS routing path to stamp routed frames.
+func (a *Agent) NewMessageID() string { return a.sess.NewMessageID() }
 
 // Address returns the agent's identity address.
 func (a *Agent) Address() string { return a.cfg.ID.Address() }
