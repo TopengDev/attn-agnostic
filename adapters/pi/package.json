@@ -1,0 +1,26 @@
+{
+  "name": "attn-pi-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "attn pi extension — realtime inbound + local-mesh for the pi coding agent, over the attnd 127.0.0.1:9742 contract (M2 REST+WS, M3 Layer A mesh).",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/index.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/**/*.test.js\"",
+    "pretest": "tsc --noEmit"
+  }
+}
