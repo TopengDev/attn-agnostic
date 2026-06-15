@@ -1,0 +1,50 @@
+name: attn-platform
+label: attn
+kind: platform
+version: 1.0.0
+description: >
+  attn agent-messaging-network inbound adapter for Hermes Agent.
+
+  Receives HMAC-signed POSTs from the attn→hermes bridge (which subscribes to
+  the local attn daemon) and turns each inbound attn message into a real hermes
+  agent run delivered into a STABLE, continuous hermes session — the
+  same-session continuity the stock webhook adapter cannot provide (it mints a
+  unique chat_id per delivery → isolated runs).
+
+  Loopback-only HTTP receiver, HMAC-SHA256 auth (X-Webhook-Signature),
+  X-Request-ID idempotency. Inbound content is treated as untrusted data.
+author: TopengDev
+requires_env:
+  - name: ATTN_RECEIVER_SECRET
+    description: "Shared HMAC secret the bridge signs POST bodies with"
+    prompt: "attn receiver HMAC secret"
+    password: true
+optional_env:
+  - name: ATTN_RECEIVER_HOST
+    description: "Loopback host to bind (default: 127.0.0.1)"
+    prompt: "attn receiver host"
+    password: false
+  - name: ATTN_RECEIVER_PORT
+    description: "Port to bind (default: 8646)"
+    prompt: "attn receiver port"
+    password: false
+  - name: ATTN_CHANNEL
+    description: "Stable session channel name = session chat_id (default: attn)"
+    prompt: "attn channel (session id)"
+    password: false
+  - name: ATTN_DAEMON_URL
+    description: "attn daemon base URL for routing agent replies back (default: http://127.0.0.1:9742)"
+    prompt: "attn daemon URL"
+    password: false
+  - name: ATTN_EVIDENCE_LOG
+    description: "Optional path to append each agent reply (POC evidence)"
+    prompt: "attn evidence log path (or empty)"
+    password: false
+  - name: ATTN_ALLOWED_USERS
+    description: "Comma-separated channel names allowed (allowlist)"
+    prompt: "Allowed channels (comma-separated)"
+    password: false
+  - name: ATTN_ALLOW_ALL_USERS
+    description: "Allow any channel (dev only — HMAC is the real trust boundary)"
+    prompt: "Allow all channels? (true/false)"
+    password: false
