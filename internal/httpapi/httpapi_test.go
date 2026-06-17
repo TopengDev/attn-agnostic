@@ -299,6 +299,42 @@ func TestPeersDBErrorIs500(t *testing.T) {
 	}
 }
 
+// TestSendFileHandler covers POST /send-file input validation and the
+// decode→tempfile→Dispatch path (no relay needed for the validation cases).
+func TestSendFileHandler(t *testing.T) {
+	s, _ := newTestServer(t)
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	// missing to → 400
+	r, code := postJSONStatus(t, ts.URL+"/send-file", `{"filename":"f.txt","data":"aGVsbG8="}`)
+	if code != http.StatusBadRequest || r["error"] == nil {
+		t.Errorf("/send-file missing to: want 400+error, got %d %v", code, r)
+	}
+
+	// missing data → 400
+	r, code = postJSONStatus(t, ts.URL+"/send-file", `{"to":"0x1234567890123456789012345678901234567890","filename":"f.txt"}`)
+	if code != http.StatusBadRequest || r["error"] == nil {
+		t.Errorf("/send-file missing data: want 400+error, got %d %v", code, r)
+	}
+
+	// invalid base64 → 400
+	r, code = postJSONStatus(t, ts.URL+"/send-file", `{"to":"0x1234567890123456789012345678901234567890","data":"not!!valid!!b64"}`)
+	if code != http.StatusBadRequest || r["error"] == nil {
+		t.Errorf("/send-file invalid base64: want 400+error, got %d %v", code, r)
+	}
+
+	// valid input passes all validation and reaches Dispatch (relay absent → relay
+	// error, not a 400); no panic is the key invariant.
+	r, code = postJSONStatus(t, ts.URL+"/send-file", `{"to":"0x1234567890123456789012345678901234567890","filename":"hello.txt","data":"aGVsbG8="}`)
+	if code == http.StatusBadRequest {
+		t.Errorf("/send-file valid input: got 400 (input rejected), want relay-level error: %v", r)
+	}
+	if r["error"] == nil {
+		t.Errorf("/send-file valid input: expected relay error (no relay in test), got %v", r)
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 func getJSON(t *testing.T, url string) map[string]any {
@@ -317,6 +353,12 @@ func getJSON(t *testing.T, url string) map[string]any {
 
 func postJSON(t *testing.T, url, body string) map[string]any {
 	t.Helper()
+	out, _ := postJSONStatus(t, url, body)
+	return out
+}
+
+func postJSONStatus(t *testing.T, url, body string) (map[string]any, int) {
+	t.Helper()
 	r, err := http.Post(url, "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
@@ -326,5 +368,5 @@ func postJSON(t *testing.T, url, body string) map[string]any {
 	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
 		t.Fatalf("decode %s: %v", url, err)
 	}
-	return out
+	return out, r.StatusCode
 }

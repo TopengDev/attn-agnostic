@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -51,6 +54,66 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
 	defer cancel()
 	res, err := s.ag.Dispatch(ctx, "send", map[string]any{"to": body.To, "message": body.Message})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	id, _ := res.Data["id"].(string)
+	status, _ := res.Data["status"].(string)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": status, "text": res.Text})
+}
+
+// handleSendFile is the Telegram bridge endpoint:
+//
+//	POST /send-file {to, filename?, data (base64), caption?, type?}
+//
+// It decodes the base64 payload to a temp file, calls the send_file op with
+// that path, then removes the temp file. caption and type are accepted but not
+// forwarded — SendFile(ctx, to, path) does not yet accept them; note as followup.
+func (s *Server) handleSendFile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To       string `json:"to"`
+		Filename string `json:"filename"`
+		Data     string `json:"data"` // base64-encoded file bytes
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.To == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "to is required"})
+		return
+	}
+	if body.Data == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "data is required"})
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(body.Data)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid base64 data: " + err.Error()})
+		return
+	}
+	// Preserve the original extension so the recipient sees a sensible filename.
+	pattern := "attn-send-*"
+	if ext := filepath.Ext(body.Filename); ext != "" {
+		pattern = "attn-send-*" + ext
+	}
+	tmp, err := os.CreateTemp("", pattern)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "temp file: " + err.Error()})
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "write temp file: " + err.Error()})
+		return
+	}
+	tmp.Close()
+
+	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
+	defer cancel()
+	res, err := s.ag.Dispatch(ctx, "send_file", map[string]any{"to": body.To, "path": tmp.Name()})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return

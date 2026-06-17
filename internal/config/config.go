@@ -72,7 +72,7 @@ func Load(keyHex string, allowGenerate bool) (*Config, error) {
 		Home:     home,
 		KeyPath:  filepath.Join(home, "key.hex"),
 		DBPath:   filepath.Join(home, "attnd.db"),
-		InboxDir: filepath.Join(home, "inbox"),
+		InboxDir: envOr("ATTN_INBOX_DIR", filepath.Join(home, "inbox")),
 		SockPath: filepath.Join(home, "attnd.sock"),
 		HTTPAddr: envOr("ATTN_HTTP_ADDR", DefaultHTTPAddr),
 		SelfName: envOr("ATTN_SESSION", "main"),

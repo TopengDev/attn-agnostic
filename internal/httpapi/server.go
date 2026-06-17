@@ -128,6 +128,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /peers", s.handlePeers)
 	mux.HandleFunc("GET /history", s.handleHistory)
 	mux.HandleFunc("POST /send", s.handleSend)
+	mux.HandleFunc("POST /send-file", s.handleSendFile)
 	// Layer-A local-mesh control: http-target self-registration (opencode/hermes
 	// adapters that the daemon drives over HTTP, vs pi-style WS self-registration).
 	mux.HandleFunc("POST /local/register", s.handleLocalRegister)
